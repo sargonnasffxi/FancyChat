@@ -48,6 +48,13 @@ local default_settings = {
     image_fit = 'stretch',
     image_tint = 0xFFFFFFFF,
 
+    -- Edge fade, in screen pixels (0 = off): the plate - image or plain
+    -- colour - fades to transparent over this distance from every edge.
+    -- Drawn as a solid centre plus concentric rings of the SAME texture
+    -- at decreasing alpha (see draw_feathered), so it needs no DLL or
+    -- texture changes and works for every fit mode.
+    feather = 0,
+
     position_x = 0,
     position_y = 0,
     visible = true,
@@ -205,6 +212,57 @@ end
 local vec_position = ffi.new('D3DXVECTOR2', { 0, 0, });
 local vec_scale = ffi.new('D3DXVECTOR2', { 1.0, 1.0, });
 local d3dwhite = d3d.D3DCOLOR_ARGB(255, 255, 255, 255);
+
+-- Scratch RECT for the feathered pieces (filled per draw, never kept).
+local piece_rect = ffi.new('RECT');
+
+-- Draw `texture`'s source window `src` (a RECT, texture pixels) at
+-- (px, py) scaled by (sx, sy), fading to transparent over `feather`
+-- screen pixels from every edge.  The fade is split into rings; each
+-- ring is cut on WHOLE source pixels and drawn with the same scale, so
+-- the pieces tile exactly with no seams.  A ring's corners belong to its
+-- top/bottom strips, giving square (Chebyshev) corners.  Alpha follows
+-- a smoothstep so the fade has no visible start or end line.
+-- Uses the shared vec_position / vec_scale; the caller restores scale.
+local function draw_feathered(sprite, texture, src, sx, sy, px, py, tint, feather)
+    local sl, st = src.left, src.top;
+    local sw, sh = src.right - src.left, src.bottom - src.top;
+    if (sw <= 0) or (sh <= 0) or (sx <= 0) or (sy <= 0) then return; end
+    -- Feather in source pixels per axis, capped at half the plate.
+    local fx = math.min(math.floor(feather / sx + 0.5), math.floor(sw / 2));
+    local fy = math.min(math.floor(feather / sy + 0.5), math.floor(sh / 2));
+    local steps = math.max(1, math.min(16, math.floor(feather / 2)));
+    local a0 = bit.band(bit.rshift(tint, 24), 0xFF);
+    local rgb = bit.band(tint, 0x00FFFFFF);
+    vec_scale.x, vec_scale.y = sx, sy;
+    local function piece(x0, y0, x1, y1, alpha)
+        if (x1 <= x0) or (y1 <= y0) or (alpha <= 0) then return; end
+        piece_rect.left, piece_rect.top = sl + x0, st + y0;
+        piece_rect.right, piece_rect.bottom = sl + x1, st + y1;
+        vec_position.x = px + (x0 * sx);
+        vec_position.y = py + (y0 * sy);
+        local c = bit.bor(bit.lshift(alpha, 24), rgb);
+        if (c < 0) then c = c + 4294967296; end
+        sprite:Draw(texture, piece_rect, vec_scale, nil, 0.0, vec_position, c);
+    end
+    -- Ring i spans [ex[i], ex[i+1]) from the left/right edges and
+    -- [ey[i], ey[i+1]) from the top/bottom edges.
+    local ex, ey = {}, {};
+    for i = 0, steps do
+        ex[i] = math.floor(fx * i / steps + 0.5);
+        ey[i] = math.floor(fy * i / steps + 0.5);
+    end
+    for i = 0, steps - 1 do
+        local t = (i + 0.5) / steps;
+        local alpha = math.floor(a0 * t * t * (3 - 2 * t) + 0.5);
+        local xa, xb, ya, yb = ex[i], ex[i + 1], ey[i], ey[i + 1];
+        piece(xa, ya, sw - xa, yb, alpha);             -- top
+        piece(xa, sh - yb, sw - xa, sh - ya, alpha);   -- bottom
+        piece(xa, yb, xb, sh - yb, alpha);             -- left
+        piece(sw - xb, yb, sw - xa, sh - yb, alpha);   -- right
+    end
+    piece(ex[steps], ey[steps], sw - ex[steps], sh - ey[steps], a0);  -- centre
+end
 -- Resolve this object's image, or nil when it has none / the file
 -- could not be loaded (in which case the caller falls back to the
 -- normal GDI+ generated rect rather than drawing nothing).
@@ -367,11 +425,17 @@ function object:render(sprite)
         end
         tint = uint32_of(tint);
 
-        vec_position.x = self.settings.position_x or 0;
-        vec_position.y = self.settings.position_y or 0;
-        vec_scale.x = scale_x;
-        vec_scale.y = scale_y;
-        sprite:Draw(img.texture, src_rect, vec_scale, nil, 0.0, vec_position, tint);
+        local feather = tonumber(self.settings.feather) or 0;
+        if (feather > 0) then
+            draw_feathered(sprite, img.texture, src_rect, scale_x, scale_y,
+                self.settings.position_x or 0, self.settings.position_y or 0, tint, feather);
+        else
+            vec_position.x = self.settings.position_x or 0;
+            vec_position.y = self.settings.position_y or 0;
+            vec_scale.x = scale_x;
+            vec_scale.y = scale_y;
+            sprite:Draw(img.texture, src_rect, vec_scale, nil, 0.0, vec_position, tint);
+        end
         -- Restore the shared scale for every following object.
         vec_scale.x = 1.0;
         vec_scale.y = 1.0;
@@ -380,10 +444,26 @@ function object:render(sprite)
 
     local texture, rect = self:get_texture();
     if (texture ~= nil) then
-        vec_position.x = self.settings.position_x;
-        vec_position.y = self.settings.position_y;
-        sprite:Draw(texture, rect, vec_scale, nil, 0.0, vec_position, d3dwhite);
+        local feather = tonumber(self.settings.feather) or 0;
+        if (feather > 0) then
+            -- The GDI+ texture already carries the fill colour and its
+            -- alpha, so the rings modulate a white tint.
+            draw_feathered(sprite, texture, rect, 1.0, 1.0,
+                self.settings.position_x, self.settings.position_y, 0xFFFFFFFF, feather);
+            vec_scale.x = 1.0;
+            vec_scale.y = 1.0;
+        else
+            vec_position.x = self.settings.position_x;
+            vec_position.y = self.settings.position_y;
+            sprite:Draw(texture, rect, vec_scale, nil, 0.0, vec_position, d3dwhite);
+        end
     end
+end
+
+-- Edge fade distance in screen pixels; 0 turns it off.  Draw-time only,
+-- so changing it never rebuilds a texture.
+function object:set_feather(px)
+    self.settings.feather = tonumber(px) or 0;
 end
 
 function object:set_width(width)

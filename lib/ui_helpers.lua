@@ -8,6 +8,7 @@ local imguiWrap = require('imguiWrap')
 local ffi       = require('ffi')
 local utils     = require('utils')
 local state     = require('lib.state')
+local theme     = require('lib.theme')
 
 local fcw         = state.fcw
 local ro          = state.ro
@@ -35,28 +36,17 @@ function M.PopColorStyles(styles)
 end
 _G.PopColorStyles = M.PopColorStyles
 
-function M.PushWindowStyle()
-	imgui.PushStyleColor(ImGuiCol_WindowBg,           {0.10, 0.10, 0.10, 0.7})
-	imgui.PushStyleColor(ImGuiCol_TitleBg,            {0.10, 0.10, 0.10, 0.7})
-	imgui.PushStyleColor(ImGuiCol_TitleBgActive,      {0.10, 0.10, 0.10, 0.7})
-	imgui.PushStyleColor(ImGuiCol_TitleBgCollapsed,   {0.10, 0.10, 0.10, 0.7})
-	imgui.PushStyleColor(ImGuiCol_ChildBg,            {0.05, 0.05, 0.05, 0.4})
-	imgui.PushStyleColor(ImGuiCol_FrameBg,            {0.30, 0.30, 0.30, 0.6})
-	imgui.PushStyleColor(ImGuiCol_ButtonHovered,      {0.70, 0.70, 0.70, 0.65})
-	imgui.PushStyleColor(ImGuiCol_ScrollbarBg,        {0,    0,    0,    0.3})
-	imgui.PushStyleColor(ImGuiCol_Button,             {0.40, 0.40, 0.40, 0.6})
-	imgui.PushStyleColor(ImGuiCol_FrameBgHovered,     {0.40, 0.40, 0.40, 0.6})
-	imgui.PushStyleColor(ImGuiCol_FrameBgActive,      {0.40, 0.40, 0.40, 0.8})
-	imgui.PushStyleColor(ImGuiCol_CheckMark,          {1.000, 0.384, 0.322, 1})
-	imgui.PushStyleColor(ImGuiCol_SliderGrab,         {0.937, 0.349, 0.290, 1})
-	imgui.PushStyleColor(ImGuiCol_ScrollbarGrab,      {0.70, 0.70, 0.70, 0.3})
-	imgui.PushStyleColor(ImGuiCol_ScrollbarGrabHovered,{0.80, 0.80, 0.80, 0.3})
-	imgui.PushStyleColor(ImGuiCol_ScrollbarGrabActive, {0.90, 0.90, 0.90, 0.3})
+-- Window theme (lib/theme.lua): dark panels with metal accents, shared
+-- with ZenithMap.  Push / Pop must stay paired; the theme module keeps
+-- the exact counts on a stack so nesting is safe.  `alpha` optionally
+-- overrides the window-background opacity for this window.
+function M.PushWindowStyle(alpha)
+	theme.push_window_stacked(alpha)
 end
 _G.PushWindowStyle = M.PushWindowStyle
 
 function M.PopWindowStyle()
-	imgui.PopStyleColor(16)
+	theme.pop_window_stacked()
 end
 _G.PopWindowStyle = M.PopWindowStyle
 
@@ -92,9 +82,7 @@ function M.AddWarning(message, y, flag, x, title)
 	local wFlags = bit.bor(ImGuiWindowFlags_NoCollapse, ImGuiWindowFlags_NoMove,
 		ImGuiWindowFlags_NoResize, ImGuiWindowFlags_NoSavedSettings)
 	imgui.PushStyleVar(ImGuiStyleVar_WindowTitleAlign, {0.5, 0.5})
-	imgui.PushStyleColor(ImGuiCol_WindowBg,      {0.1, 0.1, 0.1, 1.0})
-	imgui.PushStyleColor(ImGuiCol_TitleBg,       {0.1, 0.1, 0.1, 1.0})
-	imgui.PushStyleColor(ImGuiCol_TitleBgActive, {0.1, 0.1, 0.1, 1.0})
+	M.PushWindowStyle(0.98)
 
 	if imgui.Begin(title..'##'+fcw[1].PlayerName, set.Popup, wFlags) then
 		local winwidth                = imgui.GetWindowWidth()
@@ -118,7 +106,7 @@ function M.AddWarning(message, y, flag, x, title)
 		imgui.PopTextWrapPos()
 		imgui.End()
 	end
-	imgui.PopStyleColor(3)
+	M.PopWindowStyle()
 	imgui.PopStyleVar()
 end
 _G.AddWarning = M.AddWarning
@@ -179,7 +167,11 @@ function M.DrawInfoWin(maxh, idx, name, text, icon)
 			imgui.SetCursorPosY(imgui.GetCursorPosY())
 		end
 		imgui.PushTextWrapPos(imgui.GetWindowWidth() - 16)
+		-- Title in the theme accent, body in the regular text colour -
+		-- the same split as ZenithMap's hover card.
+		imgui.PushStyleColor(ImGuiCol_Text, theme.accent())
 		imgui.TextWrapped(name)
+		imgui.PopStyleColor()
 		imgui.SetCursorPosX(cx)
 		if not icon then imgui.Dummy({0, 5}) end
 		imgui.TextWrapped(text)

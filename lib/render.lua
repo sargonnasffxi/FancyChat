@@ -13,6 +13,9 @@ local help        = require('help')
 local state          = require('lib.state')
 local ui_panels      = require('lib.ui_panels')
 local ui_settings    = require('lib.ui_settings')
+local theme          = require('lib.theme')
+local nativeinput    = require('lib.nativeinput')
+local tabfont        = require('lib.tabfont')
 local combat_packets = require('lib.combat_packets')
 local ffi            = require('ffi')
 
@@ -294,6 +297,121 @@ local function ui_hide_active(clock)
 	return clock >= uiw.UiHideAt
 end
 
+-- Height of the built-in input box docked under chat window 1: one line
+-- of the chat font plus a little padding (the floating bar's own font /
+-- padding settings do not apply to it).
+local DOCK_PAD = 3
+function M.DockedBoxHeight()
+	return allSettings.fontSettings.font_height + 4 + (DOCK_PAD * 2)
+end
+
+-- ===================================================================
+-- Resize grip: a small three-stroke mark in the plate's top-right
+-- corner.  Invisible until the mouse is over the plate, faint there and
+-- bright under the cursor, so it stays out of the way.  Dragging it
+-- previews the new size as an outline (bottom-left corner fixed, so the
+-- newest line stays put) with a "width x lines" label; releasing applies
+-- it live through ResizeChat (lib/lifecycle.lua) - no addon reload, so
+-- no chat history is lost.  Steps are whole characters across and whole
+-- lines up, within the Settings sliders' limits.
+-- Must run inside chat window `w`'s ImGui BG window, before its line
+-- hover / click handling (it sets fcw[w].ResizeHot to suppress those).
+-- ===================================================================
+local function draw_resize_grip(w, fade)
+	local fw   = fcw[w]
+	local rect = ro.RectBG[w]
+	if rect == nil or type(ResizeChat) ~= 'function' then return end
+	local s  = rect.settings
+	local fh = allSettings.fontSettings.font_height
+	local x0, y0 = s.position_x, s.position_y
+	local x1, y1 = x0 + s.width, y0 + s.height
+	-- Drawn mark size, and a hit box 8px larger so it is easy to grab.
+	local g   = math_max(16, math_floor(fh * 0.9))
+	local hit = g + 8
+	local mx, my = imGetMousePos()
+	local overPlate = mx >= x0 and mx <= x1 and my >= y0 and my <= y1
+
+	-- Hit box, kept inside the host window so ImGui can hover it.
+	local wx, wy = imgui.GetWindowPos()
+	local ww = imgui.GetWindowSize()
+	local bx = math_min(x1 - hit, wx + ww - hit - 1)
+	local by = math_max(y0, wy)
+	imgui.SetCursorScreenPos({ bx, by })
+	imgui.InvisibleButton('##fc_resize_grip_' .. w, { hit, hit })
+	local hot    = imgui.IsItemHovered()
+	local active = imgui.IsItemActive()
+
+	local lib_lc = package.loaded['lib.lifecycle'] or {}
+	local wMin, wMax = lib_lc.CHAT_WIDTH_MIN or 60, lib_lc.CHAT_WIDTH_MAX or 135
+	local lMin, lMax = lib_lc.CHAT_LINES_MIN or 8,  lib_lc.CHAT_LINES_MAX or 16
+
+	local newMaxL, newLines
+	if active then
+		if fw.ResizeStart == nil then
+			fw.ResizeStart = { mx, my, allSettings.chatLineMaxL, allSettings.ChatLines }
+		end
+		local st = fw.ResizeStart
+		newMaxL  = st[3] + math_floor((mx - st[1]) / (fh * 0.59) + 0.5)
+		newLines = st[4] + math_floor((st[2] - my) / fh + 0.5)
+		newMaxL  = math_max(wMin, math_min(wMax, newMaxL))
+		newLines = math_max(lMin, math_min(lMax, newLines))
+		fw.ResizePending = { newMaxL, newLines }
+	elseif fw.ResizeStart ~= nil then
+		-- Released: apply what the outline showed.
+		local p = fw.ResizePending
+		fw.ResizeStart, fw.ResizePending = nil, nil
+		if p ~= nil then ResizeChat(p[1], p[2]) end
+	end
+	fw.ResizeHot = hot or active
+
+	if (hot or active) and imgui.SetMouseCursor ~= nil and ImGuiMouseCursor_ResizeNESW ~= nil then
+		imgui.SetMouseCursor(ImGuiMouseCursor_ResizeNESW)
+	end
+	if hot and not active then imgui.SetTooltip('Drag to resize the chat window') end
+
+	-- Always faintly visible so players can find it; stronger over the
+	-- chat, full under the cursor.
+	local a = (hot or active) and 0.95 or (overPlate and 0.55 or 0.22)
+	a = a * (1 - math_max(0, math_min(1, fade or 0)))
+	if a <= 0.01 and not active then return end
+	local dl  = imgui.GetWindowDrawList()
+	local acc = theme.accent()
+	pcall(function()
+		dl:PushClipRectFullScreen()
+		local ok, err = pcall(function()
+			local col = theme.col(acc, a)
+			local gx, gy = x1 - 3, y0 + 3
+			-- Faint dark corner behind the strokes, for contrast on light
+			-- plates and background images.
+			if dl.AddTriangleFilled ~= nil then
+				dl:AddTriangleFilled({ gx - g - 2, gy - 1 }, { gx + 1, gy - 1 }, { gx + 1, gy + g + 2 },
+					imgui.GetColorU32({ 0, 0, 0, 0.30 * a }))
+			end
+			for _, k in ipairs({ 0.30, 0.62, 0.95 }) do
+				dl:AddLine({ gx - g * k, gy }, { gx, gy + g * k }, col, 2.0)
+			end
+			if active and newMaxL ~= nil then
+				local nw = newMaxL * fh * 0.59
+				local nh = fh * (newLines + 1) + (fh / 5)
+				dl:AddRect({ x0, y1 - nh }, { x0 + nw, y1 }, theme.col(acc, 0.9), 3, 0, 1.5)
+				dl:AddText({ x0 + nw + 6, y1 - nh }, theme.col(acc, 1.0),
+					string.format('%d x %d', newMaxL, newLines))
+			end
+		end)
+		dl:PopClipRect()
+		if not ok then error(err, 0) end
+	end)
+end
+
+-- Chat windows drop ImGui's own window border whenever the metal frame
+-- is off ("No border" / faded edges).  WindowBorderSize is read at
+-- Begin, so callers pop right after Begin.  Returns true if pushed.
+local function begin_borderless()
+	if theme.plate_frame_enabled() or ImGuiStyleVar_WindowBorderSize == nil then return false end
+	imgui.PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0)
+	return true
+end
+
 -- Pokes the auto-hide fade timer; called by every module on activity.
 function M.ResetAutoHideTimer()
 	fcw[1].autoHideTime = os.time()
@@ -302,6 +420,7 @@ _G.ResetAutoHideTimer = M.ResetAutoHideTimer
 
 function M.register()
 	ashita.events.register('d3d_present', 'present_cb', function ()
+		theme.begin_frame()
 		-- Refresh the combat-filter snapshot here, on the render
 		-- thread, so combat_packets.dispatch() in the packet_in
 		-- callback can classify actors without making any native
@@ -529,6 +648,30 @@ function M.register()
 			uiw.UiOwnedHide = ui_hide_active(_now)
 			fcw1.HideChat   = fcw1.UserHideChat or uiw.UiOwnedHide
 
+			-- Built-in chat input box (Settings -> Chat Window).  A typing
+			-- SESSION is latched on the frame the input opens: it docks into
+			-- chat window 1 only if FancyChat was on screen at that moment
+			-- (legacy chat not already opened by the player, chat not
+			-- hidden, not in Big Mode).  While it is active the legacy log
+			-- that the game slides open for typing is not treated as "legacy
+			-- chat opened", so FancyChat stays up, and lib/nativeinput.lua
+			-- hides the game's own input line (see the input bar block).
+			do
+				local inputOpen = AshitaCore:GetChatManager():IsInputOpen() == 0x11
+				if inputOpen and not fcw1.DockInputWasOpen then
+					fcw1.DockSession = allSettings.ChatInputBox[1]
+						and not uiw.LegacyChatOpen and not fcw1.HideChat and not fcw3.BigMode
+				elseif not inputOpen then
+					fcw1.DockSession = false
+				end
+				fcw1.DockInputWasOpen = inputOpen
+				fcw1.DockActive = fcw1.DockSession and allSettings.ChatInputBox[1]
+					and not fcw1.HideChat and not fcw3.BigMode and true or false
+			end
+			-- Set by the chat window 1 block below when it draws this frame.
+			fcw1.Win1Drawn = false
+			fcw1.TabsRowBottom = nil
+
 			-- Guarded: WinPtr1 is refreshed per frame from a code
 			-- operand and can legitimately be 0 before the client
 			-- settles; skip the read (keeping the previous MemValue /
@@ -541,7 +684,21 @@ function M.register()
 			end
 			if (uiw.MemValue ~= 0) then
 				local margin = 15;
-				if (uiw.LastMemValue ~= -1 and uiw.LastMemValue >= uiw.MemValue and uiw.MemValue < uiw.UISizeY-19-margin) then
+				-- While the built-in input box owns a typing session the log
+				-- opening is the game's doing, not the player's: skip it.
+				-- The skip outlasts the session until the log has slid shut
+				-- again (capped at 3 s), or the still-open log would read as
+				-- "player opened legacy chat" the frame after Enter.
+				local logClosed = uiw.MemValue >= uiw.UISizeY-19-margin
+				if fcw1.DockActive then
+					fcw1.DockSettleUntil = _now + 3
+				elseif fcw1.DockSettleUntil ~= nil and (logClosed or _now > fcw1.DockSettleUntil) then
+					fcw1.DockSettleUntil = nil
+				end
+				fcw1.DockSuppressLog = fcw1.DockSettleUntil ~= nil
+				if fcw1.DockSuppressLog then
+					-- leave LegacyChatOpen as it was (false - see the latch)
+				elseif (uiw.LastMemValue ~= -1 and uiw.LastMemValue >= uiw.MemValue and uiw.MemValue < uiw.UISizeY-19-margin) then
 						-- Only when the PLAYER opened the legacy window.  When
 					-- "Hide chat when UI is hidden" released the pin, the
 					-- window drifting open is our own doing, and replaying
@@ -603,11 +760,18 @@ function M.register()
 			if menuStatic ~= 0 then
 				MenuID = ashita.memory.read_uint32(menuStatic)
 			end
+			local inlineMCD = 0
 			if MenuID ~= 0 then
 				local menuHdr = ashita.memory.read_uint32(MenuID + 4)
 				if menuHdr ~= 0 then
 					MenuName = ashita.memory.read_string(menuHdr + 0x46, 16);
 					MenuName = string.gsub(MenuName, '\x00', ''):trimex()
+					-- The chat input line's menu control object, handed to
+					-- lib/nativeinput.lua so the built-in box can hide it.
+					-- MenuID itself is that object; menuHdr (its +4) is
+					-- the menu's entry in the static definition table,
+					-- which only carries the name.
+					if MenuName:match('menu[%s]+inline') then inlineMCD = MenuID end
 				end
 				
 				--uiw.MenuExt = ashita.memory.read_uint32(uiw.MenuPtr-0x40)
@@ -629,6 +793,7 @@ function M.register()
 				mvc.Menu1 = false;  mvc.Menu2 = false;  mvc.Menu3 = false;  mvc.Menu4 = false; mvc.Menu5 =false; mvc.Menu6 =false; mvc.Menu7 = false;
 				if imguiWrap.GetKeyDown(28) then ResetAutoHideTimer() end
 			end
+			nativeinput.capture_inline(inlineMCD, MenuName, MenuID)
 			if MenuName:find('auc1') and #uiw.MenuList > 0 and uiw.MenuList[#uiw.MenuList][1]=='menucomyn' then uiw.MenuList = {{'menuauc1',0}} end
 			--Debug(MenuName, 2, false);   -- debug_window disabled
 			
@@ -996,7 +1161,9 @@ function M.register()
 				imgui.SetNextWindowSize({ fcw1.BG_W, ro.RectBG[1].settings.height+16 });
 				imgui.SetNextWindowSizeConstraints({ fcw1.BG_W, ro.RectBG[1].settings.height+16 }, { FLT_MAX, FLT_MAX, });
 
+				local _nb = begin_borderless()
 				imgui.Begin('FancyChat_ChatBG_'+fcw1.PlayerName, true, bit_bor(fcw1.windowFlagsChatBG, allSettings.LockWindowPos[1] and FLAG_WinNoMove or 0));
+				if _nb then imgui.PopStyleVar(1) end
 			-- Setting variables to position the chat window elements --
 
 				-- Position persistence.  First logged-in frame with no
@@ -1066,7 +1233,23 @@ function M.register()
 					end
 					fcw1.MoveChat = false;
 				end
-			
+
+				-- Built-in input box: it docks under the plate, so while it
+				-- is up a window parked against the bottom of the screen is
+				-- lifted just enough to fit it (like the native log sits
+				-- above the native input line).  Not persisted - the saved
+				-- position comes from the ImGui window, which is untouched.
+				fcw1.Win1Drawn = true
+				if allSettings.ChatInputBox[1] and (fcw1.DockActive or set.InputBarTest[1]) then
+					-- DockTopRel: where the box starts relative to the window
+					-- top, measured by the input bar block (under the plate
+					-- and the tab row).  First frame: plate bottom estimate.
+					local rel = fcw1.DockTopRel or ((fcw1.BG_H * 0.8) - fcw1.RoRectBaseY
+						+ ro.RectBG[1].settings.height)
+					local over = positionStartY + rel + M.DockedBoxHeight() - dsize.y
+					if over > 0 then positionStartY = positionStartY - math_floor(over + 0.5) end
+				end
+
 				local centerPosX = (fcw1.BG_W/2 + positionStartX-3);
 				local centerPosY = (ro.RectBG[1].settings.height/2 + positionStartY)+3;
 				local imageSizeX = (fcw1.BG_W/2);
@@ -1108,6 +1291,7 @@ function M.register()
 					mouseX > centerPosX - fcw1.BG_W and mouseX < centerPosX + fcw1.BG_W
 					and mouseY > centerPosY - fcw1.BG_H/2 and mouseY < centerPosY + fcw1.BG_H/2
 					and imIsMouseDragging(FLAG_MouseLeft) and not fcw1.DraggingScroll
+					and not fcw1.ResizeHot and fcw1.ResizeStart == nil
 					and iwIsWindowHovered(FLAG_HoveredRectOnly)
 					)
 				then
@@ -1118,11 +1302,26 @@ function M.register()
 				end
 			
 				if fcw1.Dragging and imIsMouseReleased then fcw1.Dragging = false end;
+
+				-- Metal bezel around the plate (lib/theme.lua), faded
+				-- with auto-hide.  Drawn outside the plate edge so it
+				-- never covers chat text.  While the built-in input box is
+				-- docked underneath, the input bar block draws ONE frame
+				-- around plate + box instead (DockedShown is last frame's).
+				if theme.plate_frame_enabled() and not fcw1.DockedShown then
+					theme.draw_rect_object_frame(imgui.GetWindowDrawList(), ro.RectBG[1],
+						1 - math_max(0, math_min(1, fcw1.autoHideFade)), math_max(2, math_min(5, _fh * 0.15)))
+				end
 			
 			
 			
+			-- Resize grip (top-right corner); suppresses line hover/click
+			-- while the mouse is on it or a resize drag is running.
+				draw_resize_grip(1, fcw1.autoHideFade)
+				if fcw1.ResizeHot then fcw1.HoverLine = -1 end
+
 			-- Setting up line highlighting --
-				if IsRectHovered(ro.RectBG[1].settings,0) then
+				if IsRectHovered(ro.RectBG[1].settings,0) and not fcw1.ResizeHot then
 					fcw1.HoverLine = -1;
 					local parsedUrl = '';
 					local lineOffsetBase = (fcw1.BG_H/120)+(_fh)
@@ -1425,8 +1624,9 @@ function M.register()
 						ImGuiWindowFlags_NoNav,
 						ImGuiWindowFlags_NoResize,
 						ImGuiWindowFlags_AlwaysAutoResize)
+					PushWindowStyle(0.97)
 					if imgui.Begin('##fc1_help_tooltip', true, _helpFlags) then
-						imgui.Text('FancyChat - quick reference')
+						imgui.TextColored(theme.accent(), 'FancyChat - quick reference')
 						imgui.Separator()
 						imgui.BulletText('L-Click on a chat line          Copy text to clipboard')
 						imgui.BulletText('Ctrl + L-Click on a zone name   Open zone search & map popup')
@@ -1442,6 +1642,7 @@ function M.register()
 						imgui.TextDisabled('This (?) button can be disabled under Settings -> Chat Window')
 					end
 					imgui.End()
+					PopWindowStyle()
 				end
 
 
@@ -1472,16 +1673,29 @@ function M.register()
 					end
 					imgui.SetNextWindowSize(fcw1.compactSize);
 				end
-			
+				-- Bottom edge of the tab row, which hangs UNDER the plate
+				-- (TabsPos is anchor-relative, below the last line).  The
+				-- built-in input box docks beneath it.  Compact tabs in the
+				-- top-right corner sit inside the plate and leave no row.
+				if not allSettings.CompactTabs then
+					fcw1.TabsRowBottom = fcw1.TabsPos[2] + ro.RectBG[1].settings.height/(allSettings.ChatLines*0.7)
+				elseif allSettings.CompactTabsBL[1] then
+					fcw1.TabsRowBottom = fcw1.TabsPos[2] + fcw1.compactSize[2]
+				else
+					fcw1.TabsRowBottom = nil
+				end
+
 				windowFlags = bit_bor(FLAG_WinNoDecoration, FLAG_WinNoBackground);
 
+				local _nb = begin_borderless()
 				imgui.Begin('FancyChat_ChatTabs_'+fcw1.PlayerName, true, windowFlags);
+				if _nb then imgui.PopStyleVar(1) end
 				--font.FontSize = 450/_fh;
 					-- function() imgui.SetWindowFontScale(_fh/25) end,
 					-- function() end
 					-- )
 			
-				local IWwindowfont = imguiWrap.SetWindowFontScale(_fh/25)
+				local IWwindowfont = tabfont.push(_fh/25)  -- tab font + size (lib/tabfont.lua)
 				PushColorStyles(tab.ButtonColorStylesNormal);
 			
 			
@@ -1497,9 +1711,11 @@ function M.register()
 					local _br = bit.band(bit.rshift(_c, 16), 0xFF) / 255
 					local _bg = bit.band(bit.rshift(_c,  8), 0xFF) / 255
 					local _bb = bit.band(_c,                0xFF) / 255
-					imgui.PushStyleColor(ImGuiCol_Button,        {_br, _bg, _bb, _ba})
-					imgui.PushStyleColor(ImGuiCol_ButtonHovered, {0.5, 0.5, 0.5, _ba})
-					imgui.PushStyleColor(ImGuiCol_ButtonActive,  {0,   0,   0,   _ba})
+					-- Theme colours (lib/theme.lua) at the plate's alpha.
+					local _tc = theme.tab_colors({_br, _bg, _bb, _ba})
+					imgui.PushStyleColor(ImGuiCol_Button,        _tc.normal)
+					imgui.PushStyleColor(ImGuiCol_ButtonHovered, _tc.hover)
+					imgui.PushStyleColor(ImGuiCol_ButtonActive,  _tc.active)
 
 					local reserved = tabsW - ((tabsH*4)-8)-8.3
 					local cursY = imgui.GetCursorPosY()-7
@@ -1521,14 +1737,15 @@ function M.register()
 						local w  = ((tn == 'L1' or tn == 'L2') and (unitW1 * 0.5) or unitW1)
 						imgui.SetCursorPos({cursx + cursOff1, cursY});
 						if (tn == allSettings.SelectedTab) then
-							-- Selected: same RGB as the default selected
-							-- style, but alpha replaced with chat alpha.
-							-- Text alpha is left alone for legibility.
-							imgui.PushStyleColor(ImGuiCol_Text,          {0.1, 0.1, 0.1, 0.9})
-							imgui.PushStyleColor(ImGuiCol_Button,        {0.8, 0.8, 0.8, _ba})
-							imgui.PushStyleColor(ImGuiCol_ButtonActive,  {1,   1,   1,   _ba})
-							imgui.PushStyleColor(ImGuiCol_ButtonHovered, {0.7, 0.7, 0.7, _ba})
+							-- Selected: the theme's selected-tab metal with
+							-- a highlight rule under it (lib/theme.lua).
+							-- Alpha follows the plate, floored for legibility.
+							imgui.PushStyleColor(ImGuiCol_Text,          _tc.selected_text)
+							imgui.PushStyleColor(ImGuiCol_Button,        _tc.selected)
+							imgui.PushStyleColor(ImGuiCol_ButtonActive,  _tc.selected_act)
+							imgui.PushStyleColor(ImGuiCol_ButtonHovered, _tc.selected_hov)
 							imgui.Button(tn:gsub('Alt','##Alt'),{w,tabsH-2});
+							theme.underline_last_item(_tc.underline)
 							imgui.PopStyleColor(4)
 						else
 							if (imgui.Button(tn:gsub('Alt','##Alt'),{w,tabsH-2})) then
@@ -1620,9 +1837,15 @@ function M.register()
 							else
 								imgui.SetCursorPos({button_length[2],0});
 							end
+							local _ctc = theme.tab_colors({0, 0, 0, 0.3})
+							imgui.PushStyleColor(ImGuiCol_Text,          _ctc.selected_text)
+							imgui.PushStyleColor(ImGuiCol_ButtonHovered, _ctc.hover)
+							imgui.PushStyleColor(ImGuiCol_ButtonActive,  _ctc.active)
 							if imgui.Button(tab.Tabs[T_i]:gsub('Alt','##Alt'),{button_length[1],tabsH-6}) then
 								if T_i+1 <= #tab.Tabs then tab.NextTab = tab.Tabs[T_i+1]; else  tab.NextTab = tab.Tabs[1] end
 							end
+							theme.underline_last_item(_ctc.underline)
+							imgui.PopStyleColor(3)
 						end
 					end
 				
@@ -1853,7 +2076,9 @@ function M.register()
 					imgui.SetNextWindowSize({ fcw2.BG_W, ro.RectBG[2].settings.height+16 } );
 					imgui.SetNextWindowSizeConstraints({ fcw2.BG_W, ro.RectBG[2].settings.height+16 }, { FLT_MAX, FLT_MAX, } );
 
+					local _nb = begin_borderless()
 					imgui.Begin('FancyChat_ChatBG2_'+fcw1.PlayerName, true, bit_bor(fcw1.windowFlagsChatBG, allSettings.LockWindowPos[1] and FLAG_WinNoMove or 0));
+					if _nb then imgui.PopStyleVar(1) end
 
 				-- Setting variables to position the chat window elements --
 					do
@@ -1947,6 +2172,7 @@ function M.register()
 						and mouseY > centerPosY - fcw2.BG_H/2 and mouseY < centerPosY + fcw2.BG_H/2
 						and imIsMouseDragging(FLAG_MouseLeft)
 						and iwIsWindowHovered(FLAG_HoveredRectOnly)
+						and not fcw2.ResizeHot and fcw2.ResizeStart == nil
 						)
 					then
 						fcw2.Dragging = true;
@@ -1957,8 +2183,16 @@ function M.register()
 				
 					if fcw2.Dragging and imIsMouseReleased then fcw2.Dragging = false end;
 
-				-- Setting up line highlighting --
-					if IsRectHovered(ro.RectBG[2].settings,0) then
+				if theme.plate_frame_enabled() then
+					theme.draw_rect_object_frame(imgui.GetWindowDrawList(), ro.RectBG[2],
+						1 - math_max(0, math_min(1, fcw1.autoHideFade)), math_max(2, math_min(5, _fh * 0.15)))
+				end
+
+					draw_resize_grip(2, fcw1.autoHideFade)
+				if fcw2.ResizeHot then fcw2.HoverLine = -1 end
+
+			-- Setting up line highlighting --
+					if IsRectHovered(ro.RectBG[2].settings,0) and not fcw2.ResizeHot then
 						fcw2.HoverLine = -1;
 						local parsedUrl = '';
 						local lineOffsetBase = (fcw2.BG_H/120)+(_fh)
@@ -2151,10 +2385,12 @@ function M.register()
 				
 					windowFlags = bit_bor(FLAG_WinNoDecoration, FLAG_WinNoBackground);
 
+					local _nb = begin_borderless()
 					imgui.Begin('FancyChat_ChatTabs2_'+fcw1.PlayerName, true, windowFlags);
+					if _nb then imgui.PopStyleVar(1) end
 					--font.FontSize = 450/_fh;
 				
-					local IWwindowfont2 = imguiWrap.SetWindowFontScale(_fh/25)
+					local IWwindowfont2 = tabfont.push(_fh/25)  -- tab font + size (lib/tabfont.lua)
 					PushColorStyles(tab.ButtonColorStylesNormal);
 
 					if not allSettings.CompactTabs then
@@ -2163,9 +2399,11 @@ function M.register()
 						local _br = bit.band(bit.rshift(_c, 16), 0xFF) / 255
 						local _bg = bit.band(bit.rshift(_c,  8), 0xFF) / 255
 						local _bb = bit.band(_c,                0xFF) / 255
-						imgui.PushStyleColor(ImGuiCol_Button,        {_br, _bg, _bb, _ba})
-						imgui.PushStyleColor(ImGuiCol_ButtonHovered, {0.5, 0.5, 0.5, _ba})
-						imgui.PushStyleColor(ImGuiCol_ButtonActive,  {0,   0,   0,   _ba})
+						-- Theme colours (lib/theme.lua) at the plate's alpha.
+						local _tc = theme.tab_colors({_br, _bg, _bb, _ba})
+						imgui.PushStyleColor(ImGuiCol_Button,        _tc.normal)
+						imgui.PushStyleColor(ImGuiCol_ButtonHovered, _tc.hover)
+						imgui.PushStyleColor(ImGuiCol_ButtonActive,  _tc.active)
 
 						local reserved = tabsW -1.5
 						local cursY = imgui.GetCursorPosY()-7
@@ -2187,11 +2425,12 @@ function M.register()
 							local w  = ((tn == 'L1' or tn == 'L2') and (unitW2 * 0.5) or unitW2)
 							imgui.SetCursorPos({cursx + cursOff2, cursY});
 							if (tn == allSettings.SelectedTab2) then
-								imgui.PushStyleColor(ImGuiCol_Text,          {0.1, 0.1, 0.1, 0.9})
-								imgui.PushStyleColor(ImGuiCol_Button,        {0.8, 0.8, 0.8, _ba})
-								imgui.PushStyleColor(ImGuiCol_ButtonActive,  {1,   1,   1,   _ba})
-								imgui.PushStyleColor(ImGuiCol_ButtonHovered, {0.7, 0.7, 0.7, _ba})
+								imgui.PushStyleColor(ImGuiCol_Text,          _tc.selected_text)
+								imgui.PushStyleColor(ImGuiCol_Button,        _tc.selected)
+								imgui.PushStyleColor(ImGuiCol_ButtonActive,  _tc.selected_act)
+								imgui.PushStyleColor(ImGuiCol_ButtonHovered, _tc.selected_hov)
 								imgui.Button(tn:gsub('Alt','##Alt'),{w,tabsH-2});
+								theme.underline_last_item(_tc.underline)
 								imgui.PopStyleColor(4)
 							else
 								if (imgui.Button(tn:gsub('Alt','##Alt'),{w,tabsH-2})) then
@@ -2216,9 +2455,15 @@ function M.register()
 								else
 									imgui.SetCursorPos({button_length[2],0});
 								end
+								local _ctc = theme.tab_colors({0, 0, 0, 0.3})
+								imgui.PushStyleColor(ImGuiCol_Text,          _ctc.selected_text)
+								imgui.PushStyleColor(ImGuiCol_ButtonHovered, _ctc.hover)
+								imgui.PushStyleColor(ImGuiCol_ButtonActive,  _ctc.active)
 								if imgui.Button(tab.Tabs[T_i]:gsub('Alt','##Alt'),{button_length[1],tabsH-6}) then
 									if T_i+1 <= #tab.Tabs then tab.NextTab2 = tab.Tabs[T_i+1]; else  tab.NextTab2 = tab.Tabs[1] end
 								end
+								theme.underline_last_item(_ctc.underline)
+								imgui.PopStyleColor(3)
 							end
 						end
 						
@@ -2447,6 +2692,10 @@ function M.register()
 			-- info-button hover tooltip earlier in this file.
 			imgui.SetNextWindowFocus()
 
+			-- Themed panel (lib/theme.lua).  Pushed before the
+			-- first-frame alpha so the pops below unwind in order.
+			PushWindowStyle(0.97)
+
 			if maskFirstFrame then
 				-- Near-transparent alpha (1/255) on the first render
 				-- frame so the user never sees the popup at the wrong
@@ -2542,9 +2791,10 @@ function M.register()
 							-- the same hue family rather than reverting
 							-- to ImGui's default blue on hover.
 							if isActive then
-								imgui.PushStyleColor(ImGuiCol_Button,        {0.20, 0.65, 0.30, 1.0})
-								imgui.PushStyleColor(ImGuiCol_ButtonHovered, {0.30, 0.80, 0.40, 1.0})
-								imgui.PushStyleColor(ImGuiCol_ButtonActive,  {0.10, 0.50, 0.20, 1.0})
+								local _p = theme.palette()
+								imgui.PushStyleColor(ImGuiCol_Button,        _p.button_active)
+								imgui.PushStyleColor(ImGuiCol_ButtonHovered, theme.lighten(_p.button_active, 0.15))
+								imgui.PushStyleColor(ImGuiCol_ButtonActive,  _p.button_hover)
 							end
 
 							-- '##' + per-row suffix gives the button a
@@ -2709,6 +2959,7 @@ function M.register()
 			if maskFirstFrame then
 				imgui.PopStyleVar()
 			end
+			PopWindowStyle()
 		end
 
 		-- Zone-map windows.  Each entry in set.zoneMapWindows was
@@ -2728,8 +2979,10 @@ function M.register()
 		-- enum exposed as a 1-indexed Lua array, so the index needs
 		-- a +1 bump.  The returned value is an ImVec4 with .x/.y/.z/.w
 		-- which we unpack into a plain table for PushStyleColor.
-		local _bg = imgui.GetStyle().Colors[ImGuiCol_WindowBg + 1]
-		local _bgVec = {_bg.x, _bg.y, _bg.z, _bg.w}
+		-- Now the theme's window colour (lib/theme.lua) rather than
+		-- ImGui's global style, which the themed body no longer uses.
+		local _bg = theme.palette().window_bg
+		local _bgVec = {_bg[1], _bg[2], _bg[3], theme.window_alpha()}
 		for wi = #set.zoneMapWindows, 1, -1 do
 			local mw = set.zoneMapWindows[wi]
 			-- Default size: a square at 70% of the current display
@@ -2749,6 +3002,7 @@ function M.register()
 			-- above.  The title text and close-X stay visible since
 			-- those use ImGuiCol_Text / ImGuiCol_CloseButton which we
 			-- don't touch.
+			PushWindowStyle()
 			imgui.PushStyleColor(ImGuiCol_TitleBg,          _bgVec)
 			imgui.PushStyleColor(ImGuiCol_TitleBgActive,    _bgVec)
 			imgui.PushStyleColor(ImGuiCol_TitleBgCollapsed, _bgVec)
@@ -2777,6 +3031,7 @@ function M.register()
 			end
 			imgui.End()
 			imgui.PopStyleColor(3)
+			PopWindowStyle()
 			if not mw.opened[1] then
 				-- Release the shared texture when the last window
 				-- referencing it closes.  Setting the cache entry to
@@ -2804,13 +3059,26 @@ function M.register()
 		-- character in allSettings.InputBarPos with the Window1Pos
 		-- conventions (sentinel spawn, clamp >= 0, save on release).
 		-- Width / plate color+opacity / font size are live settings.
+		--
+		-- DOCKED mode (Settings -> Chat Window -> Built-in chat input
+		-- box): the same mirror, drawn as part of chat window 1 - flush
+		-- under its plate, at the plate's width, in the chat font and
+		-- plate colour, framed together with the plate - while the
+		-- game's own input line is hidden (lib/nativeinput.lua).  It
+		-- takes over from the floating bar whenever chat window 1 is on
+		-- screen for the typing session (fcw1.DockActive, latched when
+		-- the input opened); otherwise the floating bar, if enabled, is
+		-- used as before and the native line stays visible.
 		-- ============================================================
-		if allSettings.InputBar[1] and fo.InputBar ~= nil and ro.InputBarBG ~= nil
-			and fcw1.LoggedIn and not fcw1.Zoning and not uiw.UiOwnedHide
-			and (AshitaCore:GetChatManager():IsInputOpen() == 0x11
-				or set.InputBarTest[1]) then
+		local inputOpenNow = AshitaCore:GetChatManager():IsInputOpen() == 0x11
+		local docked = allSettings.ChatInputBox[1] and fcw1.Win1Drawn and ro.RectBG[1] ~= nil
+			and (fcw1.DockActive or set.InputBarTest[1]) and true or false
+		local floating = (not docked) and allSettings.InputBar[1]
+			and (inputOpenNow or set.InputBarTest[1])
+		if (docked or floating) and fo.InputBar ~= nil and ro.InputBarBG ~= nil
+			and fcw1.LoggedIn and not fcw1.Zoning and not uiw.UiOwnedHide then
 
-			local barFH = allSettings.InputBarFontHeight
+			local barFH = docked and allSettings.fontSettings.font_height or allSettings.InputBarFontHeight
 			-- Same width formula as the chat windows (chatLineMaxL *
 			-- font_height * 0.59), using the bar's own font height.
 			-- Hard-capped just under the DLL's 4096px texture canvas:
@@ -2824,8 +3092,48 @@ function M.register()
 			-- vertical padding.  barH feeds the drag-window size, the
 			-- overlap tests and the spawn candidates, so they all
 			-- track the padded footprint automatically.
-			local barPad = allSettings.InputBarPadding
+			local barPad = docked and DOCK_PAD or allSettings.InputBarPadding
 			local barH  = barFH + 4 + (barPad * 2)
+			local ibX, ibY
+			-- Docked geometry, from THIS frame's anchor (the same formula
+			-- PositionLines places the plate with), so box and plate move
+			-- together on the frame the window is dragged or lifted.
+			local dockX, dockY, plateTopY
+			if docked then
+				local plate = ro.RectBG[1].settings
+				dockX     = math_floor(fcw1.Anchor_X - fcw1.RoRectBaseX)
+				plateTopY = math_floor(fcw1.Anchor_Y - fcw1.RoRectBaseY)
+				-- Below the plate AND below the tab row hanging under it.
+				dockY     = math_floor(math_max(plateTopY + plate.height, fcw1.TabsRowBottom or 0) + 0.5)
+				-- Offset from the window's top for the lift in the chat
+				-- window 1 block; constant for a given layout, so the lift
+				-- cannot feed back on itself.
+				fcw1.DockTopRel = dockY - fcw1.BG_Y
+				barW      = plate.width
+				if barW > 4000 then barW = 4000 end
+			end
+
+			if docked then
+				-- Host window only for the draw list (frame + separator);
+				-- pinned to the box, never moves, takes no input.
+				imgui.SetNextWindowPos({ dockX, dockY })
+				imgui.SetNextWindowSize({ barW, barH })
+				imgui.Begin('FancyChat_InputBox_'+fcw1.PlayerName, true,
+					bit_bor(fcw1.windowFlagsChatBG, FLAG_WinNoMove, ImGuiWindowFlags_NoInputs or 0))
+				if theme.plate_frame_enabled() then
+					local dl = imgui.GetWindowDrawList()
+					theme.draw_plate_frame(dl, dockX, plateTopY, dockX + barW, dockY + barH, 1.0,
+						math_max(2, math_min(5, _fh * 0.15)))
+					pcall(function()
+						dl:PushClipRectFullScreen()
+						dl:AddLine({ dockX + 2, dockY }, { dockX + barW - 2, dockY },
+							theme.col(theme.frame().hi, 0.45), 1.0)
+						dl:PopClipRect()
+					end)
+				end
+				imgui.End()
+				ibX = dockX + 4
+			else
 			local ibOwned = settings.logged_in
 				and not fcw1.ReloadPending
 				and fcw1.PlayerName == settings.name
@@ -2939,8 +3247,15 @@ function M.register()
 					SaveSettings()
 				end
 			end
-			local ibX, ibY = imgui.GetCursorScreenPos()
+			ibX, ibY = imgui.GetCursorScreenPos()
+			-- Metal bezel around the bar's plate (lib/theme.lua).  Uses
+			-- last frame's plate rect, set just below.
+			if theme.plate_frame_enabled() then
+				theme.draw_rect_object_frame(imgui.GetWindowDrawList(), ro.InputBarBG, 1.0,
+					math_max(2, math_min(4, barFH * 0.14)))
+			end
 			imgui.End()
+			end -- floating
 
 			-- Live style application (all setters are change-guarded
 			-- in gdifonts, so calling them per frame is free when the
@@ -2950,7 +3265,11 @@ function M.register()
 			-- keeps its own colours while the Bar BG Opacity slider
 			-- still fades it; fill_color stays in sync for the plain
 			-- plate used when no image is selected or it won't load.
-			if allSettings.InputBarBGImage ~= '' then
+			-- Docked: plain plate in the chat plate's own colour, so the box
+			-- reads as part of the chat window rather than a second panel.
+			if docked then
+				ro.InputBarBG:set_image_path('')
+			elseif allSettings.InputBarBGImage ~= '' then
 				-- Path cached per filename (see the chat plate block
 				-- in d3d_endscene for the rationale).
 				if fcw1.BarBGImageFor ~= allSettings.InputBarBGImage then
@@ -2962,7 +3281,10 @@ function M.register()
 			else
 				ro.InputBarBG:set_image_path('')
 			end
-			ro.InputBarBG:set_fill_color(allSettings.InputBarBGColor)
+			ro.InputBarBG:set_fill_color(docked and allSettings.rectSettings.fill_color or allSettings.InputBarBGColor)
+			-- Docked box follows the chat plate's faded edges, gentler (it
+			-- is one line tall); the floating bar keeps its own style.
+			ro.InputBarBG:set_feather(docked and math_min(theme.plate_fade_px(), math_floor(barH / 3)) or 0)
 			ro.InputBarBG:set_width(barW)
 			ro.InputBarBG:set_height(barH)
 			ro.InputBarBG:set_position_x(ibX - 4)
@@ -2978,6 +3300,9 @@ function M.register()
 			local INK_BIAS = 0.10
 			local barTopPad = math_floor(((barH - barFH) / 2) - (barFH * INK_BIAS))
 			if barTopPad < 0 then barTopPad = 0 end
+			-- Docked: the plate's top edge is pinned to the chat plate's
+			-- bottom edge, so derive the text line from it.
+			if docked then ibY = dockY + barTopPad end
 			ro.InputBarBG:set_position_y(ibY - barTopPad)
 			fo.InputBar:set_font_height(barFH)
 			fo.InputBar:set_position_x(ibX + 4)
@@ -3010,11 +3335,21 @@ function M.register()
 					local ok, val = pcall(function() return cmgr:GetInputTextDisplay() end)
 					fcw1.InputBarDisplayOk = (ok and type(val) == 'string')
 				end
-				if fcw1.InputBarDisplayOk then
+				-- NOT while the built-in box has the native line hidden: the
+				-- display buffer is built by the line's own drawing, so with
+				-- the line hidden it goes stale and the box stays blank.  The
+				-- raw buffer is the typed text itself and keeps updating;
+				-- the only thing lost is the live auto-translate preview
+				-- (a phrase shows once it is committed).
+				local useDisplay = fcw1.InputBarDisplayOk
+					and not (docked and nativeinput.active())
+				if useDisplay then
 					local ok, val = pcall(function() return cmgr:GetInputTextDisplay() end)
 					if ok and type(val) == 'string' then raw = val end
 				end
-				if raw == '' then
+				-- Also fall back when the display buffer holds only control
+				-- codes (nothing drawable once they are stripped).
+				if raw == '' or raw:gsub('\127.', '') == '' then
 					raw = cmgr:GetInputTextRaw() or ''
 				end
 			end
@@ -3202,6 +3537,9 @@ function M.register()
 				shownGlyphs = shownGlyphs + 1
 			end
 			txt = body
+			-- Markup-free copy for measuring the caret prefix below (colour
+			-- codes change no widths, but would break glyph slicing).
+			local plainBody = body
 			-- Colour the auto-translate brackets exactly like chat
 			-- lines do (parser.lua's MCList: open bracket green, close
 			-- bracket red), restoring the bar's channel colour after
@@ -3228,8 +3566,32 @@ function M.register()
 			-- and the caret stay on the same grid.
 			local leadN = #(txt:match('^( *)'))
 			if leadN > 0 then txt = txt:sub(leadN + 1) end
+			-- The bar follows the chat font, which may be proportional
+			-- (Segoe UI ...), so a space is not one "glyph width": its own
+			-- advance is measured once per font + size, from the gap two
+			-- bars leave around ten spaces.  Used for the stripped leading
+			-- spaces and for spaces trailing the caret prefix - the two
+			-- places the DLL's ink-bounds crop hides them from a measure.
+			local spaceW = glyphW
+			local measure = fo.InputBarMeasure
+			if measure ~= nil then
+				measure:set_font_family(fo.InputBar.settings.font_family)
+				measure:set_font_height(barFH)
+				local key = tostring(fo.InputBar.settings.font_family) .. '|' .. barFH
+				if fcw1.InputBarSpaceKey ~= key then
+					measure:set_text('|          |')
+					local wGap = measure:get_text_size()
+					measure:set_text('||')
+					local wTight = measure:get_text_size()
+					local sw = ((wGap or 0) - (wTight or 0)) / 10
+					fcw1.InputBarSpaceW   = (sw > 0) and sw or nil
+					fcw1.InputBarSpaceKey = key
+					fcw1.InputBarMeasureFor = nil
+				end
+				spaceW = fcw1.InputBarSpaceW or glyphW
+			end
 			fo.InputBar:set_text(txt)
-			fo.InputBar:set_position_x(ibX + 4 + math_floor(leadN * glyphW))
+			fo.InputBar:set_position_x(ibX + 4 + math_floor(leadN * spaceW))
 			-- Glyph count that produced the CURRENT texture; consumed
 			-- by next frame's advance measurement above.
 			-- Trailing spaces are NOT in the rasterised width: the DLL
@@ -3287,9 +3649,31 @@ function M.register()
 				-- is on the rasterised line and takes its measured advance.
 				local caretX
 				if caretVisCol <= leadN then
-					caretX = caretVisCol * glyphW
+					caretX = caretVisCol * spaceW
+				elseif measure ~= nil then
+					-- Exact for any font: the caret sits after the measured
+					-- width of the text in front of it.  Trailing spaces
+					-- of that prefix are added at the measured space
+					-- advance (the ink-bounds crop drops them).  Cached on
+					-- the prefix, so it re-rasterises only on an edit or a
+					-- cursor move.
+					local ps = utf8_glyph_starts(plainBody)
+					local cut = math_min(caretVisCol, #ps - 1)
+					local prefix = plainBody:sub(ps[leadN + 1] or 1, ps[cut + 1] - 1)
+					local trail = #(prefix:match('( *)$'))
+					local core = prefix:sub(1, #prefix - trail)
+					if fcw1.InputBarMeasureFor ~= core then
+						local cw = 0
+						if core ~= '' then
+							measure:set_text(core)
+							cw = measure:get_text_size() or 0
+						end
+						fcw1.InputBarMeasureFor = core
+						fcw1.InputBarMeasureW   = cw
+					end
+					caretX = (leadN * spaceW) + (fcw1.InputBarMeasureW or 0) + (trail * spaceW)
 				else
-					caretX = (leadN * glyphW) + ((caretVisCol - leadN) * caretGlyphW)
+					caretX = (leadN * spaceW) + ((caretVisCol - leadN) * caretGlyphW)
 				end
 				fo.InputBarCaret:set_position_x(ibX + 4 + math_floor(caretX))
 				fo.InputBarCaret:set_position_y(ibY)
@@ -3317,11 +3701,40 @@ function M.register()
 			-- deliberately skipped while the legacy chat is open (i.e.
 			-- while typing), so the bar needs its own draw pass there.
 			fcw1.InputBarActive = true
+			fcw1.DockedShown = docked
 		elseif ro.InputBarBG ~= nil and fo.InputBar ~= nil then
 			ro.InputBarBG:set_visible(false)
 			fo.InputBar:set_visible(false)
 			if fo.InputBarCaret ~= nil then fo.InputBarCaret:set_visible(false) end
 			fcw1.InputBarActive = false
+			fcw1.DockedShown = false
+		else
+			fcw1.DockedShown = false
+		end
+
+		-- Native input line / legacy log visibility (lib/nativeinput.lua).
+		-- The input line is hidden only on frames the docked box is really
+		-- drawing the typed text, so the player can never lose sight of
+		-- what they type.  The log windows the game slides open for typing
+		-- stay hidden for the session and until they have slid shut again
+		-- (DockSuppressLog), unless the player wants to see legacy chat.
+		-- Everything hidden is written back the moment a condition drops.
+		if not fcw1.Closing and not fcw1.Zoning then
+			nativeinput.update(
+				fcw1.DockedShown and fcw1.DockActive and inputOpenNow,
+				allSettings.ChatInputBox[1] and fcw1.DockSuppressLog
+					and not allSettings.ShowWithLegacy[1] and not fcw1.HideChat,
+				{ uiw.WinPtr1, uiw.WinPtr2 })
+			if nativeinput.diag_armed() then
+				nativeinput.diag_tick({
+					input_open     = inputOpenNow,
+					dock_active    = fcw1.DockActive,
+					docked_shown   = fcw1.DockedShown,
+					chat_input_box = allSettings.ChatInputBox[1],
+					box_text       = fo.InputBar ~= nil and fo.InputBar.settings.text or nil,
+					slots          = { uiw.WinPtr1, uiw.WinPtr2 },
+				}, _now)
+			end
 		end
 
 		-- Broadcast chat anchor data for BOTH chat windows to the Compass
@@ -3464,6 +3877,10 @@ function M.register()
 					end
 				end
 				ro.RectBG[1]:set_fill_color(plateColor)
+				-- Edge fade (Settings -> Appearance -> Chat window edges); draw-time
+				-- only in gdifonts/rectobject.lua, so setting it per frame is free.
+				local plateFade = theme.plate_fade_px()
+				ro.RectBG[1]:set_feather(plateFade)
 				-- Per-line opacity: only push a NEW value through
 				-- SetChatOpacity when it actually changed.  Calling it
 				-- every frame would overwrite the per-line opacity that
@@ -3475,6 +3892,7 @@ function M.register()
 				end
 				if allSettings.SecondChat[1] then
 					ro.RectBG[2]:set_fill_color(plateColor)
+					ro.RectBG[2]:set_feather(plateFade)
 					if fcw2.lastFadeOpacity ~= fadeOpacity then
 						SetChatOpacity(fadeOpacity, 2)
 						fcw2.lastFadeOpacity = fadeOpacity
@@ -3491,6 +3909,7 @@ function M.register()
 				-- after Big Mode is switched off.
 				if ro.RectBG[1] ~= nil then ro.RectBG[1]:set_image_path('') end
 				if ro.RectBG[2] ~= nil then ro.RectBG[2]:set_image_path('') end
+				if ro.BigMode ~= nil then ro.BigMode:set_feather(theme.plate_fade_px()) end
 				if fcw3.RequestAuxFix then FixAux(3, fcw3.ChatLines) end
 				PositionLines(3, fcw3.ChatLines)
 			end

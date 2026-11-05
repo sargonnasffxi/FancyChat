@@ -402,6 +402,13 @@ function M.default_settings()
 		-- for the menu-avoidance feature).  Authoritative everywhere,
 		-- including test mode.
 		InputBarLock         = T{false},
+		-- Built-in chat input box: while typing, the game's own input
+		-- line (and the legacy log it slides open) is hidden and the
+		-- typed text is shown in a box docked under chat window 1
+		-- instead (lib/nativeinput.lua + the input bar block in
+		-- render.lua).  Takes precedence over the floating InputBar
+		-- whenever chat window 1 is on screen; live, no restart.
+		ChatInputBox         = T{true},
 		-- When true, FancyChat stays visible even while the legacy
 		-- FFXI chat window is open (clicked / typing).  Default off,
 		-- which preserves the original "legacy open => FC hidden"
@@ -409,6 +416,25 @@ function M.default_settings()
 		-- render.lua alongside uiw.LegacyChatOpen.
 		ShowWithLegacy       = T{false},
 		HelpButton           = T{true},
+		-- Interface theme (lib/theme.lua): 'gold' (Gilded bronze, the
+		-- ZenithMap default), 'silver' or 'obsidian'.  Drives every
+		-- FancyChat window, the tab bar and the plate frame.
+		UITheme              = 'gold',
+		-- Background opacity of FancyChat's ImGui windows.
+		UIWindowAlpha        = 0.95,
+		-- Metal frame around the chat plates and the input bar.
+		ChatFrame            = T{true},
+		-- Fade the chat plates' edges (colour or background image) to
+		-- transparent over ChatEdgeFadePx pixels; replaces the frame
+		-- while on (lib/theme.lua edge_style).  Live.
+		ChatEdgeFade         = T{false},
+		ChatEdgeFadePx       = 24,
+		-- Chat tab bar font (lib/tabfont.lua): an installed family name,
+		-- '' = ImGui's default font.  Loaded at addon load, so a change
+		-- applies on Restart & apply.  TabFontScale multiplies the bar's
+		-- automatic text size (which follows the chat font size); live.
+		TabFont              = '',
+		TabFontScale         = 1.0,
 		CompactTabs          = false,
 		PlayerName           = '---',
 		FormatTSMode         = 1,
@@ -632,7 +658,8 @@ M.color_descriptions = {
 -- Tab-button color schemes (constant, exported by reference).
 -- ================================================================
 M.tab_button_styles_normal = {
-	T{ImGuiCol_Text,          {1.0, 1.0, 1.0, 0.8}},
+	-- Warm parchment white, the theme's text tone (lib/theme.lua).
+	T{ImGuiCol_Text,          {0.93, 0.90, 0.84, 0.85}},
 	T{ImGuiCol_Button,        {0,   0,   0,   0.3}},
 	T{ImGuiCol_ButtonActive,  {0,   0,   0,   1.0}},
 	T{ImGuiCol_ButtonHovered, {0.5, 0.5, 0.5, 0.7}},

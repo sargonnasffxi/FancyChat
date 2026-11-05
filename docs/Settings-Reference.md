@@ -13,7 +13,20 @@ Open the Settings panel with `/fchat settings`. It has six tabs:
 
 Visual appearance and behaviour of the chat plate.
 
+### Appearance
+
+These apply immediately, with no restart.
+
+- **Interface theme** — colour scheme for every FancyChat window (Settings, Manual, GuideMe, Notes, item previews, the zone search popup, map viewers) and the chat tab bar. **Gilded bronze** (the default) matches the ZenithMap addon's settings window; **Mythril silver** and **Obsidian** match its other frame styles.
+- **Window opacity** — background opacity of those windows (0.50–1.00, default 0.95).
+- **Chat window edges** — **Metal frame** draws a bezel in the theme's metal around each chat plate, the Big Mode plate and the input box, like the ZenithMap frame (the default). **No border** shows the plates only. **No border, faded edges** also fades each chat plate — its colour or its background image — to transparent towards its edges; **Edge fade width** (4–120 px, default 24) sets how far in the fade reaches, capped at half the plate's height. The docked chat input box fades too, more gently. All apply immediately.
+
+### Layout
+
 - **Font Size**, **Chat Width**, **Plate BG Alpha**, **Number of chat lines** — basic dimensions and dark-background opacity. Changes require **Restart & apply** to take effect.
+- **Chat Font** — the font for the chat lines, Big Mode and the chat input box. The list shows every TrueType / OpenType font installed on your PC (for example Segoe UI); type in the box at the top of the list to filter it, and use **Rescan** after installing a new font. Applies on **Restart & apply**. Consolas, the default, is fixed-width, and line wrapping is tuned for it: with a proportional font lines wrap a little before the plate edge, and a line of mostly wide capitals can run slightly past it. If the chosen font is later uninstalled, it shows as "(not installed)" and the chat falls back to Arial.
+- **Tab Font** — the font for the tab buttons along the chat windows (All, Combat, Party, ...): **Default (Ashita font)** or any installed font. Applies on **Restart & apply**.
+- **Tab Text Size** — size of the tab text, 50–200% of the automatic size (which follows **Font Size**). Applies immediately.
 - **Enable second chat window** — adds a separate plate (independently configurable).
 - **Custom Tab Modes** — pick which message types funnel into the **Custom** tab (NPC, Tell, Party, Linkshell, Shout — any combination).
 - **Position Offsets** — fine-tune each plate's X/Y offset relative to its anchor. Save / Reset buttons provided.
@@ -25,6 +38,15 @@ Visual appearance and behaviour of the chat plate.
 - **Use half window length for docked UI elements** — companion panels (GuideMe, Notepad) use half the chat width when docked.
 - **Prevent obstructing FFXI UI** — auto-slide when an FFXI menu opens.
 - **Prevent obstructing Auto-Translate menu as well** — same thing for that specific UI.
+
+### Chat input
+
+These apply immediately, with no restart.
+
+- **Built-in chat input box (replaces the game's input line)** — while you type, the game's own input line and the legacy log it opens are hidden, FancyChat stays on screen, and your text appears in a box docked under the first chat window, at the plate's width, in the chat font and plate colour. Typing, auto-translate, Tab name completion and history work exactly as before, because the game still handles the input. If the window sits at the bottom of the screen it is lifted while you type so the box fits. When the first chat window isn't on screen (FancyChat hidden, Big Mode, or legacy chat already open) the game's input line is used instead. On by default. See [The Chat Window → Typing](The-Chat-Window.md#typing).
+- **Enable input chat bar** — a separate, movable bar that mirrors the input line, with its own width, font size, padding, colour, opacity and background image. Used only when the built-in box is off or the first chat window isn't shown.
+- **Test mode** — shows the built-in box (or the floating bar) without opening the chat input, so you can preview it. Not saved.
+- **Lock bar position** — stops the floating bar from being dragged.
 
 ## Font Colors
 

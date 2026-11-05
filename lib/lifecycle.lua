@@ -106,6 +106,126 @@ end
 _G.DumpChat = M.DumpChat
 
 -- Post-login one-shot: build BigMode objects, size chat windows.
+-- =====================================================================
+-- Chat plate geometry derived from Font Size, Chat Width (chatLineMaxL)
+-- and Number of chat lines.  Run by Init, and again by ResizeChat when
+-- the resize grip changes the size live.  Fill colours are only set at
+-- Init: a live resize must not cut into an auto-hide fade.
+-- =====================================================================
+function M.ApplyChatGeometry(init)
+	local fh    = allSettings.fontSettings.font_height
+	local maxL  = allSettings.chatLineMaxL
+	local lines = allSettings.ChatLines
+	fcw[3].BG_W = maxL * fh * 0.59
+
+	fcw[1].BG_W = maxL * fh * 0.59
+	fcw[1].BG_H = math.floor(fh * lines * fcw[1].BGScale)
+	if init then ro.RectBG[1]:set_fill_color(allSettings.rectSettings.fill_color) end
+	ro.RectBG[1]:set_width(maxL * fh * 0.59)
+	ro.RectBG[1]:set_height(fh * (lines + 1) + (fh / 5))
+
+	if allSettings.SecondChat[1] and ro.RectBG[2] ~= nil then
+		fcw[2].BG_W = maxL * fh * 0.59
+		fcw[2].BG_H = math.floor(fh * lines * fcw[2].BGScale)
+		if init then ro.RectBG[2]:set_fill_color(allSettings.rectSettings.fill_color) end
+		ro.RectBG[2]:set_width(maxL * fh * 0.59)
+		ro.RectBG[2]:set_height(fh * (lines + 1) + (fh / 5))
+	end
+
+	fcw[1].RoRectBaseX = ((fh * 2.5) / fh)
+	fcw[1].RoRectBaseY = (lines * fh) + (fh / (fh - 100)) - (fh / 10)
+	fcw[2].RoRectBaseY = (lines * fh) + (fh / (fh - 100)) - (fh / 10)
+	fcw[3].RoRectBaseY = (fcw[3].ChatLines * fh) + (fh / (fh - 100)) - (fh / 10)
+	fcw[1].FWDBaseX    = (fh / 1.35) + (maxL * fh / 400)
+	fcw[1].BKWBaseY    = (fh * lines) - ((fh * 5) / fh)
+	fcw[1].BKWBaseX    = ((fh * 1.5) / fh)
+end
+
+-- Limits shared with the Chat Width / Number of chat lines sliders.
+M.CHAT_WIDTH_MIN, M.CHAT_WIDTH_MAX = 60, 135
+M.CHAT_LINES_MIN, M.CHAT_LINES_MAX = 8, 16
+
+-- =====================================================================
+-- Live resize from the grip on the chat window (render.lua).  Changes
+-- Chat Width and Number of chat lines WITHOUT the addon reload that
+-- "Restart & apply" uses - a reload would wipe the chat history.
+--   * line text objects are created / destroyed to the new count;
+--   * the visible lines are repainted from the tab buffers, so nothing
+--     is lost (lines already received keep the wrap width they arrived
+--     with; new ones wrap at the new width);
+--   * the window is moved up/down by the height change so its BOTTOM
+--     edge (the newest line) stays put while the top edge follows the
+--     grip.
+-- Returns true when the size changed.
+-- =====================================================================
+local function make_line_objects(w)
+	local fh = allSettings.fontSettings.font_height
+	local c = gdi:create_object(allSettings.fontSettings, false)
+	local a = gdi:create_object(allSettings.fontSettings, false)
+	c:set_font_height(fh)
+	a:set_font_height(fh)
+	c:set_position_x(fcw[w].Anchor_X or 0)
+	a:set_position_x(fcw[w].Anchor_X or 0)
+	a:set_visible(false)
+	table.insert(fo.Chat[w], c)
+	table.insert(fo.Aux[w], a)
+end
+
+function M.ResizeChat(maxL, lines)
+	maxL  = math.max(M.CHAT_WIDTH_MIN, math.min(M.CHAT_WIDTH_MAX, math.floor(maxL + 0.5)))
+	lines = math.max(M.CHAT_LINES_MIN, math.min(M.CHAT_LINES_MAX, math.floor(lines + 0.5)))
+	local oldLines = allSettings.ChatLines
+	if maxL == allSettings.chatLineMaxL and lines == oldLines then return false end
+	local fh = allSettings.fontSettings.font_height
+
+	allSettings.chatLineMaxL = maxL
+	allSettings.ChatLines    = lines
+	set.ChatLineMaxL = maxL
+	set.ChatLines    = lines
+
+	local last = allSettings.SecondChat[1] and 2 or 1
+	for w = 1, last do
+		if fo.Chat[w] ~= nil and #fo.Chat[w] > 0 then
+			while #fo.Chat[w] < lines do make_line_objects(w) end
+			while #fo.Chat[w] > lines do
+				gdi:destroy_object(table.remove(fo.Chat[w]))
+				gdi:destroy_object(table.remove(fo.Aux[w]))
+			end
+			-- Ring-buffer head back to slot 1; ResetScrolling repaints
+			-- every slot from the buffer in that order.
+			fcw[w].ChatHead = 1
+		end
+	end
+
+	M.ApplyChatGeometry(false)
+
+	-- Keep the bottom edge in place: the plate grows downward from the
+	-- window top, so move the window up by the added height.
+	local dy = fh * (lines - oldLines)
+	for w, key in ipairs({ 'Window1Pos', 'Window2Pos' }) do
+		if w <= last and allSettings[key] ~= nil and allSettings[key][1] >= 0 then
+			allSettings[key][2] = math.max(0, math.floor(allSettings[key][2] - dy + 0.5))
+			fcw[w].PosAppliedFor = nil
+		end
+	end
+
+	for w = 1, last do
+		if fo.Chat[w] ~= nil and #fo.Chat[w] > 0 then
+			ResetScrolling(w)
+			fcw[w].PositionLinesRequest = { true, true }
+			fcw[w].PosChanged  = true
+			fcw[w].RequestAuxFix = true
+			fcw[w].TabsPos     = nil
+			fcw[w].compactPos  = nil
+			fcw[w].compactSize = nil
+		end
+	end
+	fcw[1].DockTopRel = nil
+	M.SaveSettings()
+	return true
+end
+_G.ResizeChat = M.ResizeChat
+
 function M.Init()
 	local dsize = imgui.GetIO().DisplaySize
 
@@ -167,27 +287,7 @@ function M.Init()
 		if allSettings.SecondChat[1] then ChangeTab(2, tab.NextTab2) end
 	end
 
-	fcw[1].BG_W = allSettings.chatLineMaxL * allSettings.fontSettings.font_height * 0.59
-	fcw[1].BG_H = math.floor(allSettings.fontSettings.font_height * allSettings.ChatLines * fcw[1].BGScale)
-	ro.RectBG[1]:set_fill_color(allSettings.rectSettings.fill_color)
-	ro.RectBG[1]:set_width(allSettings.chatLineMaxL * allSettings.fontSettings.font_height * 0.59)
-	ro.RectBG[1]:set_height(allSettings.fontSettings.font_height * (allSettings.ChatLines + 1) + (allSettings.fontSettings.font_height / 5))
-
-	if allSettings.SecondChat[1] then
-		fcw[2].BG_W = allSettings.chatLineMaxL * allSettings.fontSettings.font_height * 0.59
-		fcw[2].BG_H = math.floor(allSettings.fontSettings.font_height * allSettings.ChatLines * fcw[2].BGScale)
-		ro.RectBG[2]:set_fill_color(allSettings.rectSettings.fill_color)
-		ro.RectBG[2]:set_width(allSettings.chatLineMaxL * allSettings.fontSettings.font_height * 0.59)
-		ro.RectBG[2]:set_height(allSettings.fontSettings.font_height * (allSettings.ChatLines + 1) + (allSettings.fontSettings.font_height / 5))
-	end
-
-	fcw[1].RoRectBaseX = ((allSettings.fontSettings.font_height * 2.5) / allSettings.fontSettings.font_height)
-	fcw[1].RoRectBaseY = (allSettings.ChatLines * allSettings.fontSettings.font_height) + (allSettings.fontSettings.font_height / (allSettings.fontSettings.font_height - 100)) - (allSettings.fontSettings.font_height / 10)
-	fcw[2].RoRectBaseY = (allSettings.ChatLines * allSettings.fontSettings.font_height) + (allSettings.fontSettings.font_height / (allSettings.fontSettings.font_height - 100)) - (allSettings.fontSettings.font_height / 10)
-	fcw[3].RoRectBaseY = (fcw[3].ChatLines    * allSettings.fontSettings.font_height) + (allSettings.fontSettings.font_height / (allSettings.fontSettings.font_height - 100)) - (allSettings.fontSettings.font_height / 10)
-	fcw[1].FWDBaseX    = (allSettings.fontSettings.font_height / 1.35) + (allSettings.chatLineMaxL * allSettings.fontSettings.font_height / 400)
-	fcw[1].BKWBaseY    = (allSettings.fontSettings.font_height * allSettings.ChatLines) - ((allSettings.fontSettings.font_height * 5) / allSettings.fontSettings.font_height)
-	fcw[1].BKWBaseX    = ((allSettings.fontSettings.font_height * 1.5) / allSettings.fontSettings.font_height)
+	M.ApplyChatGeometry(true)
 
 	-- Build a lowercased zone-name lookup once at init time so the
 	-- right-click /sea tooltip in render.lua can scan chat lines
@@ -331,6 +431,10 @@ function M.register()
 		-- mismatches before Sugar's table.merge runs on logout.
 		state.replace_allSettings(utils.RepairSettings(allSettingsOG, allSettings))
 
+		-- Tab bar font: loaded here, outside any frame, because adding a
+		-- font to ImGui's atlas mid-frame can crash newer Ashita builds.
+		pcall(function() require('lib.tabfont').load() end)
+
 		if not allSettings.ver or allSettings.ver ~= addon.version then
 			allSettings.ver = addon.version
 			M.SaveSettings()
@@ -384,6 +488,8 @@ function M.register()
 		set.ChatLineMaxL         = allSettings.chatLineMaxL
 		set.PlateBGColor         = allSettings.rectSettings.fill_color
 		set.FontHeight           = allSettings.fontSettings.font_height
+		set.FontFamily           = allSettings.fontSettings.font_family
+		set.TabFont              = allSettings.TabFont or ''
 		set.ChatLines            = allSettings.ChatLines
 		set.InstantChatScroll[1] = allSettings.InstantChatScroll[1]
 		set.SplitLinkshellTab[1] = allSettings.SplitLinkshellTab[1]
@@ -484,6 +590,11 @@ function M.register()
 		fo.InputBarCaret:set_text('|')
 		fo.InputBarCaret:set_z_order(3)
 		fo.InputBarCaret:set_visible(false)
+		-- Never drawn: only rasterised to MEASURE text, so the caret can
+		-- be placed exactly in a proportional chat font (render.lua sets
+		-- it to the text in front of the caret and reads its width).
+		fo.InputBarMeasure = gdi:create_object(allSettings.fontSettings, false)
+		fo.InputBarMeasure:set_visible(false)
 
 		local customSettings = allSettings.fontSettings
 		customSettings.bg_overlap = 0
@@ -598,6 +709,9 @@ function M.register()
 		if allSettings.autoDumpChat[1] then
 			M.DumpChat()
 		end
+		-- Never leave the game's input line / log windows hidden behind
+		-- after FancyChat is gone (built-in chat input box).
+		pcall(function() require('lib.nativeinput').restore_all() end)
 		fcw[1].Closing = true
 		gdi:destroy_interface()
 		M.SaveSettings()

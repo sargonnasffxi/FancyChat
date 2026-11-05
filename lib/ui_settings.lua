@@ -9,6 +9,8 @@ local gdi       = require('gdifonts.include')
 local ffi       = require('ffi')
 local help      = require('help')
 local state     = require('lib.state')
+local theme     = require('lib.theme')
+local fontlist  = require('lib.fontlist')
 
 local fcw            = state.fcw
 local tab            = state.tab
@@ -296,6 +298,155 @@ local function bg_picker(label, id, key, kind)
 	imgui.PopStyleVar()
 end
 
+-- Appearance: interface theme, window opacity and the plate frame.
+-- Unlike most of the Chat Window tab these apply live (no restart):
+-- the theme is re-read every frame by lib/theme.lua.
+-- Installed-font dropdown (Chat Window tab), shared by the chat font and
+-- the tab font.  Lists every installed TrueType / OpenType family
+-- (lib/fontlist.lua) under a type-to-filter box.  Returns the newly
+-- picked family ('' = the default entry) or nil when nothing changed.
+-- default_label: when given, a first entry that picks '' (ImGui default).
+local fontFilters = {}
+local function font_combo(id, cur, default_label)
+	local filter = fontFilters[id]
+	if filter == nil then filter = { '' }; fontFilters[id] = filter end
+	local label
+	if cur == '' and default_label ~= nil then
+		label = default_label
+	else
+		label = cur
+		if not fontlist.has(cur) then label = cur .. '  (not installed)' end
+	end
+	local picked = nil
+	if imgui.BeginCombo('##' .. id, label, ImGuiComboFlags_HeightLarge or 0) then
+		local appearing = imgui.IsWindowAppearing ~= nil and imgui.IsWindowAppearing()
+		if appearing then
+			filter[1] = ''
+			if imgui.SetKeyboardFocusHere ~= nil then imgui.SetKeyboardFocusHere() end
+		end
+		-- FIXED width: the combo popup auto-sizes to its widest item, so
+		-- a width relative to the popup (-N) chases its own growth and
+		-- the popup widens every frame.
+		imgui.PushItemWidth(200)
+		imgui.InputText('##' .. id .. 'Filter', filter, 64)
+		imgui.PopItemWidth()
+		imgui.SameLine()
+		if imgui.SmallButton('Rescan##' .. id .. 'Rescan') then fontlist.refresh() end
+		imgui.Separator()
+		if default_label ~= nil then
+			if imgui.Selectable(default_label, cur == '') and cur ~= '' then picked = '' end
+		end
+		local needle = filter[1]:lower()
+		local shown = 0
+		for _, name in ipairs(fontlist.get()) do
+			if needle == '' or name:lower():find(needle, 1, true) then
+				shown = shown + 1
+				if imgui.Selectable(name, name == cur) and name ~= cur then
+					picked = name
+				end
+				if appearing and name == cur and imgui.SetItemDefaultFocus ~= nil then
+					imgui.SetItemDefaultFocus()
+				end
+			end
+		end
+		if shown == 0 then imgui.TextDisabled('No installed font matches.') end
+		imgui.EndCombo()
+	end
+	return picked
+end
+
+-- Chat font: staged in set.FontFamily and, like Font Size, applied by
+-- "Restart & apply" - every chat line object is rebuilt with it then.
+local function draw_font_picker()
+	local picked = font_combo('ChatFontCombo', set.FontFamily or 'Consolas', nil)
+	if picked ~= nil then set.FontFamily = picked end
+	AddTooltip('The font used for the chat lines, Big Mode and the chat input box; any font installed on this PC (for example Segoe UI). Applies on "Restart & apply". Consolas (the default) is fixed-width, which is what line wrapping is tuned for: with a proportional font lines wrap a little before the plate edge, and a line of mostly wide capitals can run slightly past it. Use Rescan after installing a new font.', 4)
+end
+
+-- Tab font: staged in set.TabFont, loaded by lib/tabfont.lua on the next
+-- addon load ("Restart & apply"); '' keeps ImGui's default font.
+local function draw_tab_font_picker()
+	local picked = font_combo('TabFontCombo', set.TabFont or '', 'Default (Ashita font)')
+	if picked ~= nil then set.TabFont = picked end
+	AddTooltip('The font for the tab buttons along the chat windows (All, Combat, Party, ...). Applies on "Restart & apply". The text size slider below applies immediately.', 4)
+end
+
+local function draw_appearance_section(dsize)
+	local col = (dsize.x / 4.3 - dsize.x / 8) * (1920 / dsize.x)
+
+	theme.section('Appearance')
+	imgui.PushItemWidth(dsize.x / 7.5)
+
+	imgui.AlignTextToFramePadding()
+	imgui.Text('Interface theme')
+	imgui.SameLine()
+	imgui.SetCursorPosX(col)
+	local cur = theme.key()
+	if imgui.BeginCombo('##UIThemeCombo', theme.frames[cur].label, ImGuiComboFlags_None) then
+		for _, k in ipairs(theme.frame_order) do
+			if imgui.Selectable(theme.frames[k].label, k == cur) and k ~= cur then
+				allSettings.UITheme = k
+				SaveSettings()
+			end
+		end
+		imgui.EndCombo()
+	end
+	AddTooltip('Colour scheme for every FancyChat window, the tab bar and the chat frame. Gilded bronze matches ZenithMap. Applies immediately.', 4)
+
+	imgui.AlignTextToFramePadding()
+	imgui.Text('Window opacity')
+	imgui.SameLine()
+	imgui.SetCursorPosX(col)
+	local wa = T{theme.window_alpha()}
+	if imgui.SliderFloat('##UIWindowAlphaSlider', wa, 0.5, 1.0, '%.2f',
+		bit.bor(ImGuiSliderFlags_AlwaysClamp, ImGuiSliderFlags_NoRoundToFormat)) then
+		allSettings.UIWindowAlpha = wa[1]
+	end
+	if imgui.IsItemDeactivatedAfterEdit() then SaveSettings() end
+	AddTooltip('Background opacity of the Settings, Manual, GuideMe, Notes and preview windows.', 4)
+
+	imgui.PopItemWidth()
+
+	-- Chat window edges: frame / none / fade.  Stored as the two flags
+	-- ChatFrame and ChatEdgeFade so older settings keep their meaning.
+	local EDGE_STYLES = {
+		{ key = 'frame', label = 'Metal frame' },
+		{ key = 'none',  label = 'No border' },
+		{ key = 'fade',  label = 'No border, faded edges' },
+	}
+	local curEdge = theme.edge_style()
+	local curLabel = EDGE_STYLES[1].label
+	for _, e in ipairs(EDGE_STYLES) do if e.key == curEdge then curLabel = e.label end end
+	imgui.PushItemWidth(dsize.x / 7.5)
+	imgui.Text('Chat window edges')
+	imgui.SameLine()
+	if imgui.BeginCombo('##ChatEdgeStyle', curLabel, ImGuiComboFlags_None) then
+		for _, e in ipairs(EDGE_STYLES) do
+			if imgui.Selectable(e.label, e.key == curEdge) and e.key ~= curEdge then
+				if type(allSettings.ChatFrame) ~= 'table' then allSettings.ChatFrame = T{false} end
+				if type(allSettings.ChatEdgeFade) ~= 'table' then allSettings.ChatEdgeFade = T{false} end
+				allSettings.ChatFrame[1]    = (e.key == 'frame')
+				allSettings.ChatEdgeFade[1] = (e.key == 'fade')
+				SaveSettings()
+			end
+		end
+		imgui.EndCombo()
+	end
+	AddTooltip('Metal frame: a bezel in the interface theme\'s metal around each chat plate, the Big Mode plate and the input box, like the ZenithMap frame. No border: the plates only. Faded edges: no border, and each chat plate (its colour or background image) fades to transparent towards its edges. Applies immediately.', 4)
+	if curEdge == 'fade' then
+		local fadePx = T{ tonumber(allSettings.ChatEdgeFadePx) or 24 }
+		imgui.Text('Edge fade width')
+		imgui.SameLine()
+		if imgui.SliderInt('##ChatEdgeFadePx', fadePx, 4, 120, '%d px', ImGuiSliderFlags_AlwaysClamp) then
+			allSettings.ChatEdgeFadePx = fadePx[1]
+		end
+		if imgui.IsItemDeactivatedAfterEdit() then SaveSettings() end
+		AddTooltip('How far in from each edge the fade reaches. It is capped at half the plate\'s height, so very large values fade the whole plate towards its middle.', 4)
+	end
+	imgui.PopItemWidth()
+	imgui.Dummy({0, 4})
+end
+
 
 
 function M.draw_settings_panel()
@@ -334,6 +485,8 @@ function M.draw_settings_panel()
 		set.ChatLineMaxL         = allSettings.chatLineMaxL
 		set.PlateBGColor         = allSettings.rectSettings.fill_color
 		set.FontHeight           = allSettings.fontSettings.font_height
+		set.FontFamily           = allSettings.fontSettings.font_family
+		set.TabFont              = allSettings.TabFont or ''
 		set.InstantChatScroll[1] = allSettings.InstantChatScroll[1]
 		set.SplitLinkshellTab[1] = allSettings.SplitLinkshellTab[1]
 		for ct = 1, #allSettings.CustomTabModes do
@@ -369,6 +522,9 @@ function M.draw_settings_panel()
 			imguiWrap.BeginChild('##Chat Window Child',
 				{(setsizex * 3.8 / 3.9) - (12 * (1 - (setsizex * 3.8 / 1920))) - 3, setsizey * 2.7 / 2.8 - 60}, true)
 
+			draw_appearance_section(dsize)
+			theme.section('Chat window')
+
 			local fontSize = T{set.FontHeight}
 			local cposY = imgui.GetCursorPosY()
 			local cposX = imgui.GetCursorPosX()
@@ -380,6 +536,36 @@ function M.draw_settings_panel()
 			if imgui.SliderInt('##FontSizeSlider', fontSize, 14, 50, '%d', ImGuiSliderFlags_AlwaysClamp) then
 				set.FontHeight = fontSize[1]
 			end
+
+			cposY = imgui.GetCursorPosY()
+			imgui.SetCursorPosY(cposY + 10)
+			imgui.Text('Chat Font')
+			imgui.SameLine()
+			imgui.SetCursorPosY(cposY + 7)
+			imgui.SetCursorPosX((dsize.x / 4.3 - dsize.x / 8) * (1920 / dsize.x))
+			draw_font_picker()
+
+			cposY = imgui.GetCursorPosY()
+			imgui.SetCursorPosY(cposY + 10)
+			imgui.Text('Tab Font')
+			imgui.SameLine()
+			imgui.SetCursorPosY(cposY + 7)
+			imgui.SetCursorPosX((dsize.x / 4.3 - dsize.x / 8) * (1920 / dsize.x))
+			draw_tab_font_picker()
+
+			-- Live: read by lib/tabfont.lua every frame.
+			local tabScale = T{ (tonumber(allSettings.TabFontScale) or 1.0) * 100 }
+			cposY = imgui.GetCursorPosY()
+			imgui.SetCursorPosY(cposY + 10)
+			imgui.Text('Tab Text Size')
+			imgui.SameLine()
+			imgui.SetCursorPosY(cposY + 7)
+			imgui.SetCursorPosX((dsize.x / 4.3 - dsize.x / 8) * (1920 / dsize.x))
+			if imgui.SliderFloat('##TabFontScaleSlider', tabScale, 50, 200, '%.0f%%', ImGuiSliderFlags_AlwaysClamp) then
+				allSettings.TabFontScale = math.floor(tabScale[1] + 0.5) / 100
+			end
+			if imgui.IsItemDeactivatedAfterEdit() then SaveSettings() end
+			AddTooltip('Size of the tab button text, relative to the automatic size (which follows Font Size). 100% = as before. Applies immediately.', 4)
 
 			local lineSize = T{set.ChatLineMaxL}
 			cposY = imgui.GetCursorPosY()
@@ -515,7 +701,7 @@ function M.draw_settings_panel()
 			end
 
 			imgui.Dummy({0, 5})
-			imgui.Text('Messages shown in Custom tab')
+			imgui.TextColored(theme.accent(), 'Messages shown in Custom tab')
 			AddTooltip('The messages selected for the custom tab won\'t appear in All if Hide from All is enabled in \'Extra\' settings.', 0, true)
 			if imgui.Checkbox('NPC',  {set.CustomTabModes[1]}) then set.CustomTabModes[1] = not set.CustomTabModes[1] end imgui.SameLine()
 			cposY = imgui.GetCursorPosY()
@@ -579,6 +765,8 @@ function M.draw_settings_panel()
 				set.ChatLineMaxL         = 100
 				set.PlateBGColor         = bit.lshift(bit.tobit(0.3 * 255), 24)
 				set.FontHeight           = 20
+				set.FontFamily           = 'Consolas'
+				set.TabFont              = ''
 				set.ChatLines            = 8
 				set.SecondChat[1]        = false
 				set.InstantChatScroll[1] = false
@@ -606,6 +794,8 @@ function M.draw_settings_panel()
 				allSettings.SecondChat[1]            = set.SecondChat[1]
 				allSettings.ChatLines                = set.ChatLines
 				allSettings.fontSettings.font_height = set.FontHeight
+				allSettings.fontSettings.font_family = set.FontFamily
+				allSettings.TabFont                  = set.TabFont
 				allSettings.rectSettings.fill_color  = set.PlateBGColor
 				allSettings.chatLineMaxL             = set.ChatLineMaxL
 				allSettings.InstantChatScroll[1]     = set.InstantChatScroll[1]
@@ -618,7 +808,7 @@ function M.draw_settings_panel()
 			end
 
 			imgui.Dummy({0, 35})
-			imgui.Text('Adjust final windows position')
+			imgui.TextColored(theme.accent(), 'Adjust final windows position')
 			AddTooltip('After adjusting the chat window positions manually, use this option to make pixel-by-pixel adjustments', 0)
 			imgui.Dummy({0, 25})
 			imgui.Dummy({5, 0}) imgui.SameLine()
@@ -766,8 +956,14 @@ function M.draw_settings_panel()
 			-- Chat input bar (live settings - no restart needed).
 			-- ------------------------------------------------------------
 			imgui.Dummy({0, 25})
-			imgui.Text('Chat input bar')
+			imgui.TextColored(theme.accent(), 'Chat input bar')
 			AddTooltip('A movable, styled mirror of the chat input line, shown while the chat input is open. Drag it to reposition; the position is saved per character.', 0)
+			imgui.Dummy({0, 5})
+			if imgui.Checkbox('Built-in chat input box (replaces the game\'s input line)##ChatInputBox', {allSettings.ChatInputBox[1]}) then
+				allSettings.ChatInputBox[1] = not allSettings.ChatInputBox[1]
+				SaveSettings()
+			end
+			AddTooltip('While you type, the game\'s own input line and the legacy log it opens are hidden, FancyChat stays on screen, and what you type appears in a box docked under the first chat window, in the chat font and plate colour. Typing, auto-translate, Tab completion and history still work as normal. If the first chat window is not on screen (hidden, Big Mode, legacy chat open) the game\'s input line is used instead. Test mode previews the box. The floating bar below is used only when this is off or the chat window is not shown.', 4)
 			imgui.Dummy({0, 5})
 			if imgui.Checkbox('Enable input chat bar', {allSettings.InputBar[1]}) then
 				allSettings.InputBar[1] = not allSettings.InputBar[1]
@@ -999,7 +1195,7 @@ function M.draw_settings_panel()
 			local letterS4 = utils.keycodesSpecial[utils.findIndexOfValue(utils.keycodesSpecial, allSettings.shortcutBigS ) ][1]
 
 			-- Hide shortcut
-			imgui.Text('Hide FancyChat Addon')
+			imgui.TextColored(theme.accent(), 'Hide FancyChat Addon')
 			AddTooltip('Quickly hide FancyChat temporarily re-enabling the legacy chat.', 0)
 			local cposY = imgui.GetCursorPosY()
 			imgui.SetCursorPosY(cposY + 5)
@@ -1034,7 +1230,7 @@ function M.draw_settings_panel()
 			imgui.Dummy({0, 20})
 
 			-- BigMode shortcut
-			imgui.Text('Big Window Mode')
+			imgui.TextColored(theme.accent(), 'Big Window Mode')
 			AddTooltip('Show Window 1 of FancyChat in "Big Mode".', 0)
 			if imgui.Checkbox('Enabled##BigShortcut', {allSettings.shortcutBigEnabled[1]}) then
 				allSettings.shortcutBigEnabled[1] = not allSettings.shortcutBigEnabled[1]
@@ -1067,7 +1263,7 @@ function M.draw_settings_panel()
 			imgui.Dummy({0, 20})
 
 			-- Tab cycle (window 1) shortcut
-			imgui.Text('Scroll Chat Tabs (window 1)')
+			imgui.TextColored(theme.accent(), 'Scroll Chat Tabs (window 1)')
 			cposY = imgui.GetCursorPosY()
 			imgui.SetCursorPosY(cposY + 5)
 			if imgui.Checkbox('Enabled##TabShortcut', {allSettings.shortcutTabEnabled[1]}) then
@@ -1101,7 +1297,7 @@ function M.draw_settings_panel()
 			imgui.Dummy({0, 20})
 
 			-- Tab cycle (window 2) shortcut
-			imgui.Text('Scroll Chat Tabs (window 2)')
+			imgui.TextColored(theme.accent(), 'Scroll Chat Tabs (window 2)')
 			cposY = imgui.GetCursorPosY()
 			imgui.SetCursorPosY(cposY + 5)
 			if imgui.Checkbox('Enabled##Tab2Shortcut', {allSettings.shortcutTab2Enabled[1]}) then
@@ -1146,7 +1342,7 @@ function M.draw_settings_panel()
 
 			-- Inline command reference
 			imgui.Dummy({0, 20})
-			imgui.Text('Commands to manually macro features')
+			imgui.TextColored(theme.accent(), 'Commands to manually macro features')
 			local cmds = {
 				{'/fancychat settings', '[Opens/Closes Settings window]'},
 				{'/fancychat guideme',  '[Opens/Closes GuideMe window]'},
@@ -1172,7 +1368,7 @@ function M.draw_settings_panel()
 			-- behaviors users may not know exist.  Same [Name]\n* keys
 			-- pattern as before for visual consistency.
 			imgui.Dummy({0, 20})
-			imgui.Text('Other Interactions')
+			imgui.TextColored(theme.accent(), 'Other Interactions')
 			local interactions = {
 				{'Copy chat line to clipboard',         'Left-Click on a chat line'},
 				{'Open URL in browser',                 'Left-Click on a [link] tag'},
@@ -1291,7 +1487,7 @@ function M.draw_settings_panel()
 			AddTooltip('When on, buttons are labelled with their Xbox names (A, B, LB, RT, ...). When off, buttons are labelled with their raw XInput index - safer for non-Xbox controllers whose physical layout maps to different XInput numbers.', 4)
 			imgui.Dummy({0, 15})
 
-			imgui.Text('Gamepad button bindings')
+			imgui.TextColored(theme.accent(), 'Gamepad button bindings')
 			AddTooltip('Click a binding to listen for the next gamepad button press. If the chosen button is already used by another action, the two actions swap. Stick scroll axes are not remappable.', 0)
 			imgui.Dummy({0, 4})
 			imgui.TextColored({0.70, 0.70, 0.70, 1.0},
@@ -1342,7 +1538,7 @@ function M.draw_settings_panel()
 			imguiWrap.BeginChild('##Extra Child',
 				{(setsizex * 3.8 / 3.9) - (12 * (1 - (setsizex * 3.8 / 1920))) - 3, setsizey * 2.7 / 2.8 - 60}, true)
 
-			imgui.Text('Block legacy chat messages')
+			imgui.TextColored(theme.accent(), 'Block legacy chat messages')
 			AddTooltip('Blocks incoming messages to the legacy chat and only display them on FancyChat. This will block the window resize animation that makes it flicker when new chat messages arrive.', 0)
 			imgui.Dummy({0, 5})
 			imgui.Dummy({5, 0}) imgui.SameLine()
@@ -1367,7 +1563,7 @@ function M.draw_settings_panel()
 			end
 
 			imgui.Dummy({0, 15})
-			imgui.Text('Chat message filtering (experimental)')
+			imgui.TextColored(theme.accent(), 'Chat message filtering (experimental)')
 			AddTooltip('These are meant for quick changes on the fly. Use the in-game filter system first!', 0, 1)
 			imgui.Dummy({0, 5})
 			imgui.Dummy({5, 0}) imgui.SameLine()
@@ -1478,7 +1674,7 @@ function M.draw_settings_panel()
 			end
 
 			imgui.Dummy({0, 5})
-			imgui.Text('Other settings')
+			imgui.TextColored(theme.accent(), 'Other settings')
 			AddTooltip('Read the manual for more detailed info', 0)
 			imgui.Dummy({0, 5})
 			imgui.Dummy({5, 0}) imgui.SameLine()
@@ -2052,8 +2248,8 @@ function M.draw_settings_panel()
 			imgui.Dummy({0, 15})
 
 			-- Section-header colour, shared by Links / Major Thanks /
-			-- Special Thanks for visual consistency.  Light azure.
-			local _SECTION = {0.50, 0.78, 0.95, 1.0}
+			-- Special Thanks for visual consistency.  Theme accent.
+			local _SECTION = theme.accent()
 
 			-- ----- Links -----
 			imgui.TextColored(_SECTION, 'Links')
@@ -2220,15 +2416,10 @@ function M.draw_settings_panel()
 		ImGuiWindowFlags_NoMove,
 		ImGuiWindowFlags_NoSavedSettings)
 
-	-- Opaque-black bg + coral buttons (#D45447 = 0.831,0.329,0.278).
-	local function pushPopupStyle()
-		imgui.PushStyleColor(ImGuiCol_WindowBg,      {0,     0,     0,     1.0})
-		imgui.PushStyleColor(ImGuiCol_ChildBg,       {0,     0,     0,     1.0})
-		imgui.PushStyleColor(ImGuiCol_Button,        {0.831, 0.329, 0.278, 1.0})
-		imgui.PushStyleColor(ImGuiCol_ButtonHovered, {0.929, 0.420, 0.353, 1.0})
-		imgui.PushStyleColor(ImGuiCol_ButtonActive,  {0.700, 0.250, 0.200, 1.0})
-	end
-	local function popPopupStyle() imgui.PopStyleColor(5) end
+	-- Opaque themed panel (lib/theme.lua), same look as the Settings
+	-- window behind it.
+	local function pushPopupStyle() PushWindowStyle(1.0) end
+	local function popPopupStyle() PopWindowStyle() end
 
 	local _disp   = imgui.GetIO().DisplaySize
 	local _cx, _cy = _disp.x * 0.5, _disp.y * 0.5

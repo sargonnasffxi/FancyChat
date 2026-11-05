@@ -15,6 +15,7 @@ Your settings, exported color palettes, and Notepad notes are per-character — 
 
 - **Drag** the plate by clicking and holding on the dark background area (not the tab bar or the side icons).
 - **Lock** the position with Settings → Chat Window → "Lock Windows Positions (disables dragging)".
+- **Resize** with the small grip in the plate's top-right corner. It is always faintly visible, stronger while the mouse is over the chat and brightest under the cursor, and its click area is a little larger than the mark. Drag right / left to change the width in characters and up / down to change the number of lines; an outline with a "width x lines" label previews the size, and it applies when you let go. The bottom-left corner stays where it is, so the newest line doesn't move. It works with the position locked, needs no restart and keeps your chat history; lines that already arrived keep their old wrap width, new ones wrap at the new width. Limits match the Chat Width (60–135) and Number of chat lines (8–16) settings.
 - **Anti-obstruction** mode (Settings → Chat Window → "Prevent obstructing FFXI UI") slides the plate out of the way when an FFXI menu (inventory, magic, mog house, etc.) opens. A companion option does the same for the Auto-Translate menu.
 - **Position offsets** (Settings → Chat Window) fine-tune each window's X/Y relative to its anchor.
 
@@ -31,6 +32,14 @@ The tab bar shows up to 7 tabs: **All** (or **AllAlt**), **Combat**, **Linkshell
 - **All** shows every message by default. Enable Settings → Extra → "Hide combat and custom logs from 'All' tab." to drop combat lines from it — the tab is renamed **AllAlt**.
 - **Custom** is configurable. Pick which categories funnel into it from Settings → Chat Window → Custom Tab Modes (NPC, Tell, Party, Linkshell, Shout — any combination).
 - **Compact tab mode** collapses the bar into a single button that cycles tabs on click. Toggle with `/fchat compact` or the side icon.
+
+## Typing
+
+With **Settings → Chat Window → "Built-in chat input box"** on (the default), opening the chat input keeps FancyChat on screen and shows what you type in a box docked under the first chat window. The game's own input line and the legacy log it would normally slide open are hidden for as long as you type, and come back as soon as you close the input or switch the option off.
+
+- The text is coloured by the chat command you type (`/p`, `/l`, `/t`, ...), using the same colours as the chat lines, and auto-translate phrases show with their usual brackets.
+- If the window is parked at the bottom of the screen it moves up while you type to make room for the box, then drops back.
+- If the first chat window isn't on screen when you start typing (FancyChat hidden, Big Mode, or the legacy chat already open) the game's input line is used as usual.
 
 ## Scrolling chat history
 

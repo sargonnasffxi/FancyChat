@@ -33,6 +33,14 @@ function M.register()
 			fcw[3].BigMode = not fcw[3].BigMode
 			return
 		end
+		-- Built-in chat input box diagnostics: arms a one-shot memory
+		-- snapshot taken the next time the chat input is open (see
+		-- lib/nativeinput.lua).  Written to <addon>/inputdiag.txt.
+		if (#args == 2 and args[2] == 'inputdiag') then
+			require('lib.nativeinput').diag_arm()
+			print('[FancyChat] Input diagnostics armed: open the chat input and type a few letters, wait 2 seconds, then close it.')
+			return
+		end
 		--[[  Commented out: action-packet debug commands.  Re-enable
 		      together with the matching block in lib/combat_packets.lua
 		      when investigating packet capture / classification issues.

@@ -8,6 +8,7 @@ local imguiWrap = require('imguiWrap')
 local gdi       = require('gdifonts.include')
 local utils     = require('utils')
 local state     = require('lib.state')
+local theme     = require('lib.theme')
 
 local fcw            = state.fcw
 local fo             = state.fo
@@ -83,6 +84,13 @@ function M.draw()
 
 		local positionStartX, positionStartY = imgui.GetCursorScreenPos()
 		local imageSizeX = (fcw[3].BG_W / 2)
+
+		-- Metal bezel around the Big Mode plate (lib/theme.lua).
+		if theme.plate_frame_enabled() then
+			local fh = allSettings.fontSettings.font_height
+			theme.draw_rect_object_frame(imgui.GetWindowDrawList(), ro.BigMode, 1.0,
+				math.max(2, math.min(5, fh * 0.15)))
+		end
 		local mouseX, mouseY = imgui.GetMousePos()
 
 		-------------------------------------------------------------
